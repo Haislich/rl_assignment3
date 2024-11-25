@@ -1,0 +1,6 @@
+numpy
+scipy
+gymnasium
+gymnasium[box2d]
+scikit-learn
+torch
