@@ -5,15 +5,15 @@ import numpy as np
 
 
 class __Encoder(nn.Module):
-    def __init__(self, latent_space_dimension, *, stride=2):
+    def __init__(self, latent_dimension, *, stride=2):
         super().__init__()
         self.relu_conv1 = nn.Conv2d(3, 32, 4, stride=stride)
         self.relu_conv2 = nn.Conv2d(32, 64, 4, stride=stride)
         self.relu_conv3 = nn.Conv2d(64, 128, 4, stride=stride)
         self.relu_conv4 = nn.Conv2d(128, 256, 4, stride=stride)
 
-        self.fc_mu = nn.Linear(2 * 2 * 256, latent_space_dimension)
-        self.fc_sigma = nn.Linear(2 * 2 * 256, latent_space_dimension)
+        self.fc_mu = nn.Linear(2 * 2 * 256, latent_dimension)
+        self.fc_sigma = nn.Linear(2 * 2 * 256, latent_dimension)
 
     def forward(self, x):
         x = F.relu(self.relu_conv1(x))
@@ -30,9 +30,9 @@ class __Encoder(nn.Module):
 
 
 class __Decoder(nn.Module):
-    def __init__(self, latent_space_dimension, image_chanels, *, stride=2):
+    def __init__(self, latent_dimension, image_chanels, *, stride=2):
         super().__init__()
-        self.fc= nn.Linear(latent_space_dimension, 1024)
+        self.fc = nn.Linear(latent_dimension, 1024)
         self.relu_deconv1 = nn.ConvTranspose2d(1024, 128, 5, stride=stride)
         self.relu_deconv2 = nn.ConvTranspose2d(128, 64, 5, stride=stride)
         self.relu_deconv3 = nn.ConvTranspose2d(64, 32, 6, stride=stride)
@@ -50,12 +50,12 @@ class __Decoder(nn.Module):
 
 
 class ConvVAE(nn.Module):
-    def __init__(self, latent_space_dimension=32, image_channels=3):
+    def __init__(self, latent_dimension=32, image_channels=3):
         super().__init__()
-        self.latent_space_dimension = latent_space_dimension
+        self.latent_dimension = latent_dimension
         # https://worldmodels.github.io/#:~:text=each%20convolution%20and%20deconvolution%20layer%20uses%20a%20stride%20of%202.
-        self.encoder = __Encoder(latent_space_dimension, stride=2)
-        self.decoder = __Decoder(latent_space_dimension, image_channels, stride=2)
+        self.encoder = __Encoder(latent_dimension, stride=2)
+        self.decoder = __Decoder(latent_dimension, image_channels, stride=2)
 
     def forward(self, x):
         mu, log_sigma = self.encoder(x)
@@ -63,3 +63,8 @@ class ConvVAE(nn.Module):
         z = mu + sigma * torch.randn_like(sigma)
         reconstruction = self.decoder(z)
         return reconstruction
+
+    def get_latent(self, observation: torch.Tensor):
+        mu, log_sigma = self.encoder(observation)
+        sigma = log_sigma.exp()
+        return mu + sigma * torch.randn_like(sigma)

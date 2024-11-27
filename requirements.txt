@@ -1,7 +1,6 @@
 numpy
 scipy
-gymnasium
+gymnasium==0.29.1
 gymnasium[box2d]
 scikit-learn
 torch
-torchvision
