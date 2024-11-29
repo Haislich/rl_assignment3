@@ -1,9 +1,12 @@
 from dataclasses import dataclass
+from typing import Generator
 import gymnasium as gym
 from PIL import Image
+from torch.utils.data.dataloader import _BaseDataLoaderIter
 from torchvision import transforms
 import torch
-from torch.utils.data import Dataset
+from torch.utils.data import Dataset, DataLoader
+import numpy as np
 
 
 @dataclass
@@ -16,20 +19,18 @@ class Rollout:
 class RolloutDataset(Dataset):
     def __init__(
         self,
-        num_rollouts,
-        max_steps=10000,
+        num_rollouts=10000,
+        max_steps=100,  # TODO: Remove
         continuous=False,
         env_name="CarRacing-v2",
     ):
         # TODO: Handle the discrete case
         self.env = gym.make(id=env_name, continuous=continuous)  # ,render_mode="human")
-        self.transformation = transforms.Compose(
-            [
-                transforms.Resize((64, 64)),  # Resize to 64x64
-                transforms.ToTensor(),  # Convert to a PyTorch tensor
-            ]
+        self.__transformation = transforms.Compose(
+            [transforms.Resize((64, 64)), transforms.ToTensor()]
         )
         self.rollouts = self._collect_rollouts(num_rollouts, max_steps)
+        self._filter_and_trucate_rollouts()
 
     def _collect_rollouts(self, num_rollouts, max_steps):
         data = []
@@ -43,14 +44,18 @@ class RolloutDataset(Dataset):
                 next_obs, reward, done, _, _ = self.env.step(action)
                 obs = transforms.ToTensor()(
                     transforms.Resize((64, 64))(Image.fromarray(obs))
-                )
+                ).permute(0, 1, 2)
                 observations.append(obs)
                 actions.append(action)
                 rewards.append(reward)
                 obs = next_obs
+                # Simulate the lack of max_steps
+                # if np.random.rand() < 0.90:
+                #     break
                 if done:
                     break
-            observations = torch.Tensor(observations)
+
+            observations = torch.stack(observations)
             rewards = torch.Tensor(rewards)
             actions = torch.Tensor(actions)
             data.append(
@@ -58,12 +63,65 @@ class RolloutDataset(Dataset):
             )
         return data
 
+    def _filter_and_trucate_rollouts(
+        self,
+    ) -> None:
+        lengths = [len(rollout.observations) for rollout in self.rollouts]
+        mean_length = int(torch.tensor(lengths, dtype=torch.float32).mean().item())
+
+        # Filter and truncate rollouts
+        filtered_rollouts = []
+        for rollout in self.rollouts:
+            if len(rollout.observations) >= mean_length:
+                # Truncate observations, actions, and rewards to the mean length
+                truncated_observations = rollout.observations[:mean_length]
+                truncated_actions = rollout.actions[:mean_length]
+                truncated_rewards = rollout.rewards[:mean_length]
+                filtered_rollouts.append(
+                    Rollout(
+                        observations=truncated_observations,
+                        actions=truncated_actions,
+                        rewards=truncated_rewards,
+                    )
+                )
+        self.rollouts = filtered_rollouts
+
     def __len__(self):
         return len(self.rollouts)
 
-    def __getitem__(self, idx):
+    def __getitem__(self, idx) -> Rollout:
         return self.rollouts[idx]
 
 
-if __name__ == "__main__":
-    dataset = RolloutDataset(num_rollouts=1, max_steps=10)
+class RolloutDataloader(DataLoader):
+    def __init__(
+        self,
+        dataset: RolloutDataset,
+        batch_size: int = 32,
+        shuffle: bool = True,
+    ):
+        super().__init__(
+            dataset=dataset,
+            batch_size=batch_size,
+            shuffle=shuffle,
+            collate_fn=self.__collate_fn,
+        )
+
+    def __collate_fn(self, batch):
+        # for elem in batch:
+        #     print(elem.observations.shape)
+        # exit()
+        batch_observations = torch.stack([rollout.observations for rollout in batch])
+        batch_actions = torch.stack([rollout.actions for rollout in batch])
+        batch_rewards = torch.stack([rollout.rewards for rollout in batch])
+
+        return (batch_observations, batch_actions, batch_rewards)
+
+    def __iter__(self):
+        for batch_observations, batch_actions, batch_rewards in super().__iter__():
+
+            # print(f"{batch_observations.shape=}")
+            # print(f"{batch_actions.shape=}")
+            # print(f"{batch_rewards.shape=}")
+
+            yield batch_observations, batch_actions, batch_rewards

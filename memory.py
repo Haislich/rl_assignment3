@@ -45,7 +45,7 @@ class MDN_RNN(nn.Module):
         # We can control the level of randomness we would like our samples to have during the
         # sampling process by introducing a temperature parameter $\tau$.
         # We can scale the softmax parameters of the categorial distribution
-        # and also the $$\sigma$$ parameters of the bivariate normal distribution
+        # and also the $\sigma$ parameters of the bivariate normal distribution
         # by a temperature parameter $\tau$ , to control the level of randomness in our samples.
         pi = F.softmax(mdn_params[:, :, 0] / temperature, dim=-1)
         # The means are taken as is
