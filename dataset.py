@@ -7,6 +7,8 @@ from torchvision import transforms
 import torch
 from torch.utils.data import Dataset, DataLoader
 import numpy as np
+from pathlib import Path
+import os
 
 
 @dataclass
@@ -20,7 +22,7 @@ class RolloutDataset(Dataset):
     def __init__(
         self,
         num_rollouts=10000,
-        max_steps=100,  # TODO: Remove
+        max_steps=100,
         continuous=False,
         env_name="CarRacing-v2",
     ):
@@ -31,15 +33,18 @@ class RolloutDataset(Dataset):
             [
                 transforms.Resize((64, 64)),
                 transforms.ToTensor(),
-                transforms.Normalize([0.5, 0.5, 0.5], [0.5, 0.5, 0.5]),
+                # transforms.Normalize([0.5, 0.5, 0.5], [0.5, 0.5, 0.5]),
             ]
         )
-        self.rollouts = self._collect_rollouts(num_rollouts, max_steps)
-        self._filter_and_trucate_rollouts()
+        if num_rollouts > 0 and max_steps > 0:
+            self.rollouts = self._collect_rollouts(num_rollouts, max_steps)
+            self._filter_and_trucate_rollouts()
 
     def _collect_rollouts(self, num_rollouts, max_steps):
         data = []
-        for _ in range(num_rollouts):
+        for episode in range(num_rollouts):
+            if episode % 100 == 0:
+                print(f"Rollout {episode=}")
             observations = []
             actions = []
             rewards = []
@@ -47,9 +52,11 @@ class RolloutDataset(Dataset):
             for _ in range(max_steps):
                 action = self.env.action_space.sample()  # Random action
                 next_obs, reward, done, _, _ = self.env.step(action)
-                obs = transforms.ToTensor()(
-                    transforms.Resize((64, 64))(Image.fromarray(obs))
-                ).permute(0, 1, 2)
+                # obs = transforms.ToTensor()(
+                #     transforms.Resize((64, 64))(Image.fromarray(obs))
+                # ).permute(0, 1, 2)
+                obs = self.__transformation(Image.fromarray(obs))
+
                 observations.append(obs)
                 actions.append(action)
                 rewards.append(reward)
@@ -67,6 +74,36 @@ class RolloutDataset(Dataset):
                 Rollout(observations=observations, actions=actions, rewards=rewards)
             )
         return data
+
+    def save(self, file_path: Path):
+        # Serialize rollouts to a file
+        os.makedirs(file_path.parents[0], exist_ok=True)
+        data_to_save = [
+            {
+                "observations": rollout.observations,
+                "actions": rollout.actions,
+                "rewards": rollout.rewards,
+            }
+            for rollout in self.rollouts
+        ]
+        torch.save(data_to_save, file_path)
+        print(f"Dataset saved to {file_path}")
+
+    @classmethod
+    def load(cls, file_path):
+        # Load rollouts from a file
+        loaded_data = torch.load(file_path, weights_only=True)
+        rollouts = [
+            Rollout(
+                observations=data["observations"],
+                actions=data["actions"],
+                rewards=data["rewards"],
+            )
+            for data in loaded_data
+        ]
+        instance = cls(num_rollouts=0, max_steps=0)  # Create an empty instance
+        instance.rollouts = rollouts  # Set loaded rollouts
+        return instance
 
     def _filter_and_trucate_rollouts(
         self,
@@ -114,9 +151,6 @@ class RolloutDataloader(DataLoader):
         )
 
     def __collate_fn(self, batch):
-        # for elem in batch:
-        #     print(elem.observations.shape)
-        # exit()
         batch_rollouts_observations = torch.stack(
             [rollout.observations for rollout in batch]
         )

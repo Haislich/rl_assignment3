@@ -1,6 +1,10 @@
+from pathlib import Path
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+
+from dataset import RolloutDataloader, RolloutDataset
+from vision import ConvVAE
 
 
 class MDN_RNN(nn.Module):
@@ -20,13 +24,20 @@ class MDN_RNN(nn.Module):
 
         self.mdn = nn.Linear(hidden_units, num_mixtures * (2 * latent_dimension + 1))
 
-    def forward(self, latent, hidden=None, temperature=None) -> tuple[
+    def forward(self, latents, actions, hidden, temperature=None) -> tuple[
         torch.Tensor,
         torch.Tensor,
         torch.Tensor,
         torch.Tensor,
     ]:
-        rnn_out, hidden = self.rnn(latent, hidden)  # LSTM output
+        # Latents conditioned by the actions
+        rnn_out, hidden = self.rnn(
+            torch.cat(
+                [latents, actions],
+                dim=-1,
+            ),
+            hidden,
+        )  # LSTM output
 
         # MDN layer: outputs mixture weights (pi), means (mu), variances (sigma)
         mdn_params = self.mdn(rnn_out)
@@ -54,5 +65,68 @@ class MDN_RNN(nn.Module):
         sigma = torch.exp(mdn_params[:, :, self.latent_dimension + 1 :])
         return pi, mu, sigma, hidden
 
-    def train(self,dataloader, epochs:int =10):
-        for 
+    def __loss(self, pi, mu, sigma, latents, target):
+        normal = torch.distributions.Normal(loc=mu, scale=sigma)
+
+    def train(
+        self,
+        dataloader: RolloutDataloader,
+        conv_vae: ConvVAE,
+        epochs: int = 10,
+    ):
+        super().train()
+        optimizer = torch.optim.Adam(self.parameters())
+
+        for epoch in range(epochs):
+            train_loss = 0
+            for batch_rollouts_observations, _, _ in dataloader:
+                # Move to the desired device, make device agnostic
+                batch_rollouts_observations = batch_rollouts_observations.to(
+                    next(self.parameters()).device
+                )
+                # Keep the original information about the shape
+                original_shape = batch_rollouts_observations.shape
+                # Make a long tensor containing all the observations
+                full_batch_observations = batch_rollouts_observations.reshape(
+                    batch_rollouts_observations.shape[0]
+                    * batch_rollouts_observations.shape[1],
+                    *batch_rollouts_observations.shape[2:],
+                )
+
+                # "break" the information relative to the sequentiality and shuffle
+                shuffled_indices = torch.randperm(full_batch_observations.shape[0])
+                shuffled_full_bro = full_batch_observations[shuffled_indices]
+                # Make the resulting shuffled observations a tensor of shape
+                # number of elements in an episode x batch_size x observation shape
+                shuffled_full_bro = shuffled_full_bro.reshape(
+                    original_shape[1], original_shape[0], *original_shape[2:]
+                )
+                # This will make ~max_episode iterations, depending on effectively the lenght of
+                # each episode
+                for batch_observations in shuffled_full_bro:
+                    optimizer.zero_grad()
+                    reconstruction, mu, log_sigma = self(batch_observations)
+                    loss = self.__loss(
+                        reconstruction, batch_observations, mu, log_sigma
+                    )
+                    loss.backward()
+                    # This loss is now relative to batch_size elements
+                    train_loss += loss.item() / shuffled_full_bro.shape[1]
+                    optimizer.step()
+                # Finally we normalize again because the previous loop was done
+                # on a number of elements equal to number of elements in an episode
+                train_loss /= shuffled_full_bro.shape[0]
+            print(f"Epoch {epoch+1} | loss {train_loss}")
+        torch.save(self.state_dict(), Path("models") / "memory.pt")
+
+
+if __name__ == "__main__":
+    file_path = Path("data") / "dataset.pt"
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    if file_path.exists():
+        dataset = RolloutDataset.load(file_path=file_path)
+    else:
+        dataset = RolloutDataset(num_rollouts=1000, max_steps=500)
+        dataset.save(file_path=file_path)
+    dataloader = RolloutDataloader(dataset, 32)
+    conv_vae = ConvVAE().from_pretrained(file_path=Path("models/vision.pt"))

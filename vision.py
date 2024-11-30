@@ -1,5 +1,5 @@
 import torch
-from torch import device, nn
+from torch import nn
 import torch.nn.functional as F
 import numpy as np
 
@@ -7,6 +7,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 
 from dataset import Rollout, RolloutDataloader, RolloutDataset
+from pathlib import Path
 
 
 class Encoder(nn.Module):
@@ -70,6 +71,7 @@ class ConvVAE(nn.Module):
         return reconstruction, mu, sigma
 
     def get_latent(self, observation: torch.Tensor) -> torch.Tensor:
+
         mu, log_sigma = self.encoder(observation)
         sigma = log_sigma.exp()
         return mu + sigma * torch.randn_like(sigma)
@@ -77,37 +79,46 @@ class ConvVAE(nn.Module):
     # This was taken directly from the ofifcial pytorch example repository:
     # https://github.com/pytorch/examples/blob/1bef748fab064e2fc3beddcbda60fd51cb9612d2/vae/main.py#L81
     def __loss(self, reconstruction, original, mu, log_sigma) -> torch.Tensor:
-        BCE = F.binary_cross_entropy(
-            input=reconstruction, target=original, reduction="sum"
-        )
-
+        bce = F.mse_loss(input=reconstruction, target=original, reduction="sum")
         # see Appendix B from VAE paper:
         # Kingma and Welling. Auto-Encoding Variational Bayes. ICLR, 2014
         # https://arxiv.org/abs/1312.6114
         # 0.5 * sum(1 + log(sigma^2) - mu^2 - sigma^2)
-        KLD = -0.5 * torch.sum(1 + log_sigma - mu.pow(2) - log_sigma.exp())
-
-        return BCE + KLD
+        kld = -0.5 * torch.sum(1 + 2 * log_sigma - mu.pow(2) - (2 * log_sigma).exp())
+        return bce + kld
 
     def train(self, dataloader: RolloutDataloader, epochs: int = 10):
         super().train()
-        train_loss = 0
         optimizer = torch.optim.Adam(self.parameters())
 
         for epoch in range(epochs):
+            train_loss = 0
             for batch_rollouts_observations, _, _ in dataloader:
-                # Now we need to make the observations in a batch a single long tensor
+                # Move to the desired device, make device agnostic
+                batch_rollouts_observations = batch_rollouts_observations.to(
+                    next(self.parameters()).device
+                )
+                # Keep the original information about the shape
                 original_shape = batch_rollouts_observations.shape
+                # Make a long tensor containing all the observations
                 full_batch_observations = batch_rollouts_observations.reshape(
                     batch_rollouts_observations.shape[0]
                     * batch_rollouts_observations.shape[1],
                     *batch_rollouts_observations.shape[2:],
                 )
+
                 # "break" the information relative to the sequentiality and shuffle
+
                 shuffled_indices = torch.randperm(full_batch_observations.shape[0])
                 shuffled_full_bro = full_batch_observations[shuffled_indices]
-                # for batch_observation in range(0,full_batch_observations.shape[0],dataloader.dataset.max_steps):
-                shuffled_full_bro = shuffled_full_bro.reshape(*original_shape)
+                # Make the resulting shuffled observations a tensor of shape
+                # number of elements in an episode x batch_size x observation shape
+                shuffled_full_bro = shuffled_full_bro.reshape(
+                    original_shape[1], original_shape[0], *original_shape[2:]
+                )
+                print(shuffled_full_bro.shape)
+                # This will make ~max_episode iterations, depending on effectively the lenght of
+                # each episode
                 for batch_observations in shuffled_full_bro:
                     optimizer.zero_grad()
                     reconstruction, mu, log_sigma = self(batch_observations)
@@ -115,11 +126,24 @@ class ConvVAE(nn.Module):
                         reconstruction, batch_observations, mu, log_sigma
                     )
                     loss.backward()
-                    train_loss += loss.item()
+                    # This loss is now relative to batch_size elements
+                    train_loss += loss.item() / shuffled_full_bro.shape[1]
                     optimizer.step()
-            print(f"Epoch {epoch+1} | loss {train_loss}")
+                # Finally we normalize again because the previous loop was done
+                # on a number of elements equal to number of elements in an episode
+                train_loss /= shuffled_full_bro.shape[0]
 
-    def __check(self, image: torch.Tensor):
+            print(f"Epoch {epoch+1} | loss {train_loss}")
+        torch.save(self.state_dict(), Path("models") / "vision.pt")
+
+    @staticmethod
+    def from_pretrained(file_path: Path):
+        loaded_data = torch.load(file_path, weights_only=False)
+        conv_vae = ConvVAE()
+        conv_vae.load_state_dict(loaded_data)
+        return conv_vae
+
+    def _check(self, image: torch.Tensor):
         image = image.to(next(self.parameters()).device)
 
         original = image
@@ -165,19 +189,18 @@ class ConvVAE(nn.Module):
 
 
 if __name__ == "__main__":
-    dataset = RolloutDataset(num_rollouts=1000, max_steps=3)
-    dataloader = RolloutDataloader(dataset, 2)
-    conv_vae = ConvVAE()
+    file_path = Path("data") / "dataset.pt"
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    if file_path.exists():
+        dataset = RolloutDataset.load(file_path=file_path)
+    else:
+        dataset = RolloutDataset(num_rollouts=1000, max_steps=500)
+        dataset.save(file_path=file_path)
+
+    dataloader = RolloutDataloader(dataset, 32)
+
+    conv_vae = ConvVAE().to(device)
     conv_vae.train(
         dataloader=dataloader,
-        epochs=2,
+        epochs=10,
     )
-    # for batch_observations, _, _ in dataloader:
-    #     # Now we need to make the observations in a batch a single long tensor
-    #     observations = batch_observations.reshape(
-    #         batch_observations.shape[0] * batch_observations.shape[1],
-    #         *batch_observations.shape[2:],
-    #     )
-    #     # "break" the information relative to the sequentiality and shuffle
-    #     shuffled_indices = torch.randperm(observations.shape[0])
-    #     shuffled_observations = observations[shuffled_indices]
