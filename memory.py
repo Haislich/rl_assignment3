@@ -53,3 +53,6 @@ class MDN_RNN(nn.Module):
         # The sigmas are exponentiated, because this guarantees positivity
         sigma = torch.exp(mdn_params[:, :, self.latent_dimension + 1 :])
         return pi, mu, sigma, hidden
+
+    def train(self,dataloader, epochs:int =10):
+        for 

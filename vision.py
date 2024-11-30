@@ -9,7 +9,7 @@ import matplotlib.pyplot as plt
 from dataset import Rollout, RolloutDataloader, RolloutDataset
 
 
-class __Encoder(nn.Module):
+class Encoder(nn.Module):
     def __init__(self, latent_dimension, *, stride=2):
         super().__init__()
         self.relu_conv1 = nn.Conv2d(3, 32, 4, stride=stride)
@@ -34,7 +34,7 @@ class __Encoder(nn.Module):
         return mu, log_sigma
 
 
-class __Decoder(nn.Module):
+class Decoder(nn.Module):
     def __init__(self, latent_dimension, image_chanels, *, stride=2):
         super().__init__()
         self.fc = nn.Linear(latent_dimension, 1024)
@@ -59,8 +59,8 @@ class ConvVAE(nn.Module):
         super().__init__()
         self.latent_dimension = latent_dimension
         # https://worldmodels.github.io/#:~:text=each%20convolution%20and%20deconvolution%20layer%20uses%20a%20stride%20of%202.
-        self.encoder = __Encoder(latent_dimension, stride=2)
-        self.decoder = __Decoder(latent_dimension, image_channels, stride=2)
+        self.encoder = Encoder(latent_dimension, stride=2)
+        self.decoder = Decoder(latent_dimension, image_channels, stride=2)
 
     def forward(self, x) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         mu, log_sigma = self.encoder(x)
@@ -77,7 +77,9 @@ class ConvVAE(nn.Module):
     # This was taken directly from the ofifcial pytorch example repository:
     # https://github.com/pytorch/examples/blob/1bef748fab064e2fc3beddcbda60fd51cb9612d2/vae/main.py#L81
     def __loss(self, reconstruction, original, mu, log_sigma) -> torch.Tensor:
-        BCE = F.binary_cross_entropy(reconstruction, original, size_average=False)
+        BCE = F.binary_cross_entropy(
+            input=reconstruction, target=original, reduction="sum"
+        )
 
         # see Appendix B from VAE paper:
         # Kingma and Welling. Auto-Encoding Variational Bayes. ICLR, 2014
@@ -87,18 +89,34 @@ class ConvVAE(nn.Module):
 
         return BCE + KLD
 
-    def train(self, epochs, dataset, optimizer):
+    def train(self, dataloader: RolloutDataloader, epochs: int = 10):
         super().train()
         train_loss = 0
         optimizer = torch.optim.Adam(self.parameters())
-        for epoch in epochs:
-            for _batch_idx, data in enumerate(dataset):
-                optimizer.zero_grad()
-                reconstruction, mu, log_sigma = self(data)
-                loss = self.__loss(reconstruction, data, mu, log_sigma)
-                loss.backward()
-                train_loss += loss.item()
-                optimizer.step()
+
+        for epoch in range(epochs):
+            for batch_rollouts_observations, _, _ in dataloader:
+                # Now we need to make the observations in a batch a single long tensor
+                original_shape = batch_rollouts_observations.shape
+                full_batch_observations = batch_rollouts_observations.reshape(
+                    batch_rollouts_observations.shape[0]
+                    * batch_rollouts_observations.shape[1],
+                    *batch_rollouts_observations.shape[2:],
+                )
+                # "break" the information relative to the sequentiality and shuffle
+                shuffled_indices = torch.randperm(full_batch_observations.shape[0])
+                shuffled_full_bro = full_batch_observations[shuffled_indices]
+                # for batch_observation in range(0,full_batch_observations.shape[0],dataloader.dataset.max_steps):
+                shuffled_full_bro = shuffled_full_bro.reshape(*original_shape)
+                for batch_observations in shuffled_full_bro:
+                    optimizer.zero_grad()
+                    reconstruction, mu, log_sigma = self(batch_observations)
+                    loss = self.__loss(
+                        reconstruction, batch_observations, mu, log_sigma
+                    )
+                    loss.backward()
+                    train_loss += loss.item()
+                    optimizer.step()
             print(f"Epoch {epoch+1} | loss {train_loss}")
 
     def __check(self, image: torch.Tensor):
@@ -147,18 +165,19 @@ class ConvVAE(nn.Module):
 
 
 if __name__ == "__main__":
-    dataset = RolloutDataset(num_rollouts=100)
-    print([dataset[i].observations.shape for i in range(2)])
-    # for rollout in dataset:
-    #     # This ensure "intra" shuffling for the observations of a given rollout
-    #     num_observations = len(rollout.observations)
-    #     shuffle_indices = torch.randperm(num_observations)
-    #     shuffled_observations = rollout.observations[shuffle_indices]
-    #     for observation in rollout.observations:
-    dataloader = RolloutDataloader(dataset, 10)
-    for batch_observations, _, _ in dataloader:
-        # Now we need to make the observations in a batch a single long batch
-        # observations = observations[]:
-        print(batch_observations.shape)
-
-        print(batch_observations.shape)
+    dataset = RolloutDataset(num_rollouts=1000, max_steps=3)
+    dataloader = RolloutDataloader(dataset, 2)
+    conv_vae = ConvVAE()
+    conv_vae.train(
+        dataloader=dataloader,
+        epochs=2,
+    )
+    # for batch_observations, _, _ in dataloader:
+    #     # Now we need to make the observations in a batch a single long tensor
+    #     observations = batch_observations.reshape(
+    #         batch_observations.shape[0] * batch_observations.shape[1],
+    #         *batch_observations.shape[2:],
+    #     )
+    #     # "break" the information relative to the sequentiality and shuffle
+    #     shuffled_indices = torch.randperm(observations.shape[0])
+    #     shuffled_observations = observations[shuffled_indices]

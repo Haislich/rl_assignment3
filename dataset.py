@@ -26,8 +26,13 @@ class RolloutDataset(Dataset):
     ):
         # TODO: Handle the discrete case
         self.env = gym.make(id=env_name, continuous=continuous)  # ,render_mode="human")
+        self.max_steps = max_steps
         self.__transformation = transforms.Compose(
-            [transforms.Resize((64, 64)), transforms.ToTensor()]
+            [
+                transforms.Resize((64, 64)),
+                transforms.ToTensor(),
+                transforms.Normalize([0.5, 0.5, 0.5], [0.5, 0.5, 0.5]),
+            ]
         )
         self.rollouts = self._collect_rollouts(num_rollouts, max_steps)
         self._filter_and_trucate_rollouts()
@@ -100,6 +105,7 @@ class RolloutDataloader(DataLoader):
         batch_size: int = 32,
         shuffle: bool = True,
     ):
+        self.dataset = dataset
         super().__init__(
             dataset=dataset,
             batch_size=batch_size,
@@ -111,17 +117,27 @@ class RolloutDataloader(DataLoader):
         # for elem in batch:
         #     print(elem.observations.shape)
         # exit()
-        batch_observations = torch.stack([rollout.observations for rollout in batch])
-        batch_actions = torch.stack([rollout.actions for rollout in batch])
-        batch_rewards = torch.stack([rollout.rewards for rollout in batch])
+        batch_rollouts_observations = torch.stack(
+            [rollout.observations for rollout in batch]
+        )
+        batch_rollouts_actions = torch.stack([rollout.actions for rollout in batch])
+        batch_rollouts_rewards = torch.stack([rollout.rewards for rollout in batch])
 
-        return (batch_observations, batch_actions, batch_rewards)
+        return (
+            batch_rollouts_observations,
+            batch_rollouts_actions,
+            batch_rollouts_rewards,
+        )
 
     def __iter__(self):
-        for batch_observations, batch_actions, batch_rewards in super().__iter__():
+        for (
+            batch_rollouts_observations,
+            batch_rollouts_actions,
+            batch_rollouts_rewards,
+        ) in super().__iter__():
 
-            # print(f"{batch_observations.shape=}")
-            # print(f"{batch_actions.shape=}")
-            # print(f"{batch_rewards.shape=}")
-
-            yield batch_observations, batch_actions, batch_rewards
+            yield (
+                batch_rollouts_observations,
+                batch_rollouts_actions,
+                batch_rollouts_rewards,
+            )
