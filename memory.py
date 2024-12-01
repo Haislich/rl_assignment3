@@ -7,13 +7,21 @@ from dataset import RolloutDataloader, RolloutDataset
 from vision import ConvVAE
 
 
+# Credits:
+# - https://github.com/sksq96/pytorch-mdn/blob/master/mdn-rnn.ipynb
+# - https://github.com/hardmaru/WorldModelsExperiments/blob/master/carracing/rnn/rnn.py
+#
 class MDN_RNN(nn.Module):
     def __init__(self, latent_dimension=32, hidden_units=256, num_mixtures=5):
         super().__init__()
         self.hidden_dim = hidden_units
         self.num_mixtures = num_mixtures
-
-        self.rnn = nn.LSTM(latent_dimension, hidden_units, batch_first=True)
+        self.action_embedding = nn.Embedding(6, latent_dimension)
+        # The *2 is not taken from the original paper, the idea is the following.
+        # We want to condition the latent on the actions, however while latents have 32 dimensions
+        # actions are scalars, so actions are embedded in a latest_dimensional space,
+        # This will result in actions and observation have an equal weight in the resulting LSTM.
+        self.rnn = nn.LSTM(2 * latent_dimension, hidden_units, batch_first=True)
         # The MDN is trying to predict the probability distribution of the next latent vector.
         # Instead of predicting a single point value (like a regression model),
         # the MDN models the output as a Mixture of Gaussian Distributions (MoG).
@@ -22,7 +30,9 @@ class MDN_RNN(nn.Module):
         # K * latetent_dimension for the means
         # K * latetent_dimension for the standard deviations
 
-        self.mdn = nn.Linear(hidden_units, num_mixtures * (2 * latent_dimension + 1))
+        self.fc_pi = nn.Linear(hidden_units, num_mixtures)
+        self.fc_mu = nn.Linear(hidden_units, num_mixtures * latent_dimension)
+        self.fc_log_sigma = nn.Linear(hidden_units, num_mixtures * latent_dimension)
 
     def forward(self, latents, actions, hidden, temperature=None) -> tuple[
         torch.Tensor,
@@ -30,6 +40,8 @@ class MDN_RNN(nn.Module):
         torch.Tensor,
         torch.Tensor,
     ]:
+
+        actions = self.action_embedding(actions.long())
         # Latents conditioned by the actions
         rnn_out, hidden = self.rnn(
             torch.cat(
@@ -37,14 +49,11 @@ class MDN_RNN(nn.Module):
                 dim=-1,
             ),
             hidden,
-        )  # LSTM output
-
-        # MDN layer: outputs mixture weights (pi), means (mu), variances (sigma)
-        mdn_params = self.mdn(rnn_out)
-        # Remove sequence dimension
-        mdn_params = mdn_params.view(
-            -1, self.num_mixtures, 2 * self.latent_dimension + 1
         )
+        # MDN layer: outputs mixture weights (pi), means (mu), variances (sigma)
+        pi = self.fc_pi(rnn_out)
+        mu = self.fc_mu(rnn_out)
+        log_sigma = self.fc_log_sigma(rnn_out)
 
         # As described in: https://arxiv.org/pdf/1308.0850 (19,20)
         # The mixture weight outputs are normalised with a softmax
@@ -58,15 +67,33 @@ class MDN_RNN(nn.Module):
         # We can scale the softmax parameters of the categorial distribution
         # and also the $\sigma$ parameters of the bivariate normal distribution
         # by a temperature parameter $\tau$ , to control the level of randomness in our samples.
-        pi = F.softmax(mdn_params[:, :, 0] / temperature, dim=-1)
-        # The means are taken as is
-        mu: torch.Tensor = mdn_params[:, :, 1 : self.latent_dimension + 1]
+        pi = F.softmax(pi / temperature, dim=-1)
         # The sigmas are exponentiated, because this guarantees positivity
-        sigma = torch.exp(mdn_params[:, :, self.latent_dimension + 1 :])
+        sigma = torch.exp(log_sigma)
         return pi, mu, sigma, hidden
 
-    def __loss(self, pi, mu, sigma, latents, target):
+    def __loss(self, pi, mu, sigma, target):
+        # Expand target to match the dimensions of mu and sigma
+        target = target.unsqueeze(1)  # Shape: (batch_size, 1, latent_dim)
+
+        # Create normal distributions for each mixture component
         normal = torch.distributions.Normal(loc=mu, scale=sigma)
+
+        # Compute log probabilities for each component
+        log_probs = normal.log_prob(
+            target
+        )  # Shape: (batch_size, num_mixtures, latent_dim)
+
+        # Sum over the latent dimensions to get total log probability per component
+        log_probs = log_probs.sum(dim=-1)  # Shape: (batch_size, num_mixtures)
+
+        # Weight by the mixture probabilities (log-sum-exp trick for numerical stability)
+        log_probs = torch.logsumexp(
+            torch.log(pi) + log_probs, dim=-1
+        )  # Shape: (batch_size)
+
+        # Negative log likelihood
+        return -log_probs.mean()
 
     def train(
         self,
@@ -129,4 +156,14 @@ if __name__ == "__main__":
         dataset = RolloutDataset(num_rollouts=1000, max_steps=500)
         dataset.save(file_path=file_path)
     dataloader = RolloutDataloader(dataset, 32)
-    conv_vae = ConvVAE().from_pretrained(file_path=Path("models/vision.pt"))
+    conv_vae = ConvVAE()  # .from_pretrained(file_path=Path("models/vision.pt"))
+    for (
+        batch_rollouts_observations,
+        batch_rollouts_actions,
+        _,
+    ) in dataloader:
+        latents = conv_vae.get_latents(batch_rollouts_observations)
+        print(f"{latents.shape=}")
+        memory = MDN_RNN()
+        print(f"{batch_rollouts_actions.shape}")
+        memory(latents, batch_rollouts_actions, None)

@@ -70,11 +70,13 @@ class ConvVAE(nn.Module):
         reconstruction = self.decoder(z)
         return reconstruction, mu, sigma
 
-    def get_latent(self, observation: torch.Tensor) -> torch.Tensor:
-
-        mu, log_sigma = self.encoder(observation)
-        sigma = log_sigma.exp()
-        return mu + sigma * torch.randn_like(sigma)
+    def get_latents(self, observations: torch.Tensor) -> torch.Tensor:
+        latents = []
+        for observation in observations:
+            mu, log_sigma = self.encoder(observation)
+            sigma = log_sigma.exp()
+            latents.append(mu + sigma * torch.randn_like(sigma))
+        return torch.stack(latents)
 
     # This was taken directly from the ofifcial pytorch example repository:
     # https://github.com/pytorch/examples/blob/1bef748fab064e2fc3beddcbda60fd51cb9612d2/vae/main.py#L81
@@ -116,7 +118,6 @@ class ConvVAE(nn.Module):
                 shuffled_full_bro = shuffled_full_bro.reshape(
                     original_shape[1], original_shape[0], *original_shape[2:]
                 )
-                print(shuffled_full_bro.shape)
                 # This will make ~max_episode iterations, depending on effectively the lenght of
                 # each episode
                 for batch_observations in shuffled_full_bro:
@@ -132,7 +133,6 @@ class ConvVAE(nn.Module):
                 # Finally we normalize again because the previous loop was done
                 # on a number of elements equal to number of elements in an episode
                 train_loss /= shuffled_full_bro.shape[0]
-
             print(f"Epoch {epoch+1} | loss {train_loss}")
         torch.save(self.state_dict(), Path("models") / "vision.pt")
 
@@ -202,5 +202,7 @@ if __name__ == "__main__":
     conv_vae = ConvVAE().to(device)
     conv_vae.train(
         dataloader=dataloader,
-        epochs=10,
+        epochs=20,
     )
+    for observation in dataset[0].observations:
+        conv_vae._check(observation.unsqueeze(0))
