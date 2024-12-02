@@ -20,12 +20,11 @@ class MDN_RNN(nn.Module):
         self.hidden_dim = hidden_units
         self.num_mixtures = num_mixtures
         self.latent_dimension = latent_dimension
-        self.action_embedding = nn.Embedding(6, latent_dimension)
         # The *2 is not taken from the original paper, the idea is the following.
         # We want to condition the latent on the actions, however while latents have 32 dimensions
         # actions are scalars, so actions are embedded in a latest_dimensional space,
         # This will result in actions and observation have an equal weight in the resulting LSTM.
-        self.rnn = nn.LSTM(2 * latent_dimension, hidden_units, batch_first=True)
+        self.rnn = nn.LSTM(latent_dimension + 1, hidden_units, batch_first=True)
         # The MDN is trying to predict the probability distribution of the next latent vector.
         # Instead of predicting a single point value (like a regression model),
         # the MDN models the output as a Mixture of Gaussian Distributions (MoG).
@@ -45,8 +44,9 @@ class MDN_RNN(nn.Module):
         torch.Tensor,
     ]:
 
-        actions = self.action_embedding(actions.long())
-        # Latents conditioned by the actions
+        # actions = self.action_embedding(actions.long())
+
+        actions = actions.unsqueeze(1)
         rnn_out, hidden = self.rnn(
             torch.cat(
                 [latents, actions],
@@ -54,10 +54,11 @@ class MDN_RNN(nn.Module):
             ),
             hidden,
         )
+
         # MDN layer: outputs mixture weights (pi), means (mu), variances (sigma)
-        pi = self.fc_pi(rnn_out)
-        mu = self.fc_mu(rnn_out)
-        log_sigma = self.fc_log_sigma(rnn_out)
+        pi = self.fc_pi(hidden[0][-1])  # Use the final layer's hidden state
+        mu = self.fc_mu(hidden[0][-1])
+        log_sigma = self.fc_log_sigma(hidden[0][-1])
 
         # As described in: https://arxiv.org/pdf/1308.0850 (19,20)
         # The mixture weight outputs are normalised with a softmax
@@ -71,35 +72,34 @@ class MDN_RNN(nn.Module):
         # We can scale the softmax parameters of the categorial distribution
         # and also the $\sigma$ parameters of the bivariate normal distribution
         # by a temperature parameter $\tau$ , to control the level of randomness in our samples.
+
         pi = F.softmax(pi / temperature, dim=-1)
         # The sigmas are exponentiated, because this guarantees positivity
         sigma = torch.exp(log_sigma)
+
         return pi, mu, sigma, hidden
 
     def loss(self, pi, mu, sigma, target):
-        # Expand target to match the dimensions of mu and sigma
         target = target.unsqueeze(1)  # Shape: (batch_size, 1, latent_dim)
-        # Reshape mu and sigma to separate mixture components and latent dimensions
         batch_size = target.size(0)
-
-        # Reshape mu and sigma to [batch_size, num_mixtures, latent_dimension]
         mu = mu.view(batch_size, self.num_mixtures, self.latent_dimension)
         sigma = sigma.view(batch_size, self.num_mixtures, self.latent_dimension)
-        # Create normal distributions for each mixture component
-        normal = torch.distributions.Normal(loc=mu, scale=sigma)
-        # Compute log probabilities for each component
-        log_probs = normal.log_prob(
-            target
-        )  # Shape: (batch_size, num_mixtures, latent_dim)
 
-        # Sum over the latent dimensions to get total log probability per component
+        # Stabilize sigma
+        sigma = torch.clamp(sigma, min=1e-8)
+
+        # Compute log probabilities
+        normal = torch.distributions.Normal(loc=mu, scale=sigma)
+        log_probs = normal.log_prob(target)
         log_probs = log_probs.sum(dim=-1)  # Shape: (batch_size, num_mixtures)
 
-        # Weight by the mixture probabilities (log-sum-exp trick for numerical stability)
-        log_probs = torch.logsumexp(
-            torch.log(pi) + log_probs, dim=-1
-        )  # Shape: (batch_size)
-        # Negative log likelihood
+        # Stabilize pi
+        log_pi = torch.log(pi + 1e-8)
+
+        # Compute log-sum-exp
+        log_probs = log_pi + log_probs
+        log_probs = torch.logsumexp(log_probs, dim=-1)  # Shape: (batch_size)
+
         return -log_probs.mean()
 
     def sample_latent(self, pi, mu, sigma):
@@ -144,33 +144,73 @@ class MemoryTrainer:
         memory.train()
         train_loss = 0
         for batch_rollouts_observations, batch_rollouts_actions, _ in train_dataloader:
+            # Move data to the correct device and reshape
             batch_rollouts_observations = batch_rollouts_observations.to(
                 next(memory.parameters()).device
-            )
-            batch_rollouts_observations = batch_rollouts_observations.permute(
+            ).permute(
                 1, 0, 2, 3, 4
-            )
+            )  # Shape: (seq_len, batch, obs_shape)
             batch_rollouts_actions = batch_rollouts_actions.to(
                 next(memory.parameters()).device
-            )
-            batch_rollouts_actions = batch_rollouts_actions.permute(1, 0)
+            ).permute(
+                1, 0
+            )  # Shape: (seq_len, batch)
+
+            # Precompute latent vectors for the entire sequence
+            latent_vectors = [
+                vision.get_latent(obs) for obs in batch_rollouts_observations
+            ]  # List of tensors (seq_len, batch, latent_dim)
 
             batch_loss = torch.zeros([]).to(next(memory.parameters()).device)
-            hidden = None
+            hidden = None  # Initialize hidden state
 
-            for timestep_observation, timestep_action in zip(
-                batch_rollouts_observations, batch_rollouts_actions
-            ):
-                target = vision.get_latent(timestep_observation)
-                pi, mu, sigma, hidden = memory(target, timestep_action, hidden)
-                rnn_latent = memory.sample_latent(pi, mu, sigma)
+            # Loop through sequence
+            for idx in range(0, batch_rollouts_actions.shape[0] - 1):
+                timestep_action = batch_rollouts_actions[idx]
+                target = latent_vectors[idx + 1]  # Next latent vector
+
+                # Predict using MDN-RNN
+                pi, mu, sigma, hidden = memory(
+                    latent_vectors[idx], timestep_action, hidden
+                )
+
+                # Compute loss
                 loss = memory.loss(pi, mu, sigma, target)
                 batch_loss += loss
 
+                # Logging (optional)
+                if idx % 10 == 0:  # Log every 10 steps
+                    print(
+                        f"Step {idx}: pi mean={pi.mean().item():.5f}, std={pi.std().item():.5f}"
+                    )
+                    print(f"mu mean={mu.mean().item():.5f}, std={mu.std().item():.5f}")
+                    print(
+                        f"sigma mean={sigma.mean().item():.5f}, std={sigma.std().item():.5f}"
+                    )
+
+            # Normalize loss by sequence length
+            batch_loss /= batch_rollouts_actions.shape[0] - 1
+
+            # Backpropagation
             optimizer.zero_grad()
             batch_loss.backward()
+
+            # Gradient clipping
+            torch.nn.utils.clip_grad_norm_(memory.parameters(), max_norm=10.0)
+
+            # Log gradient statistics
+            print("Gradient statistics:")
+            for name, param in memory.named_parameters():
+                if param.grad is not None:
+                    print(
+                        f"{name} gradient mean: {param.grad.mean().item():.5f}, std: {param.grad.std().item():.5f}"
+                    )
+
+            # Update weights
             optimizer.step()
             train_loss += batch_loss.item()
+
+        # Average train loss
         train_loss /= len(train_dataloader)
         return train_loss
 
@@ -252,58 +292,74 @@ if __name__ == "__main__":
     test_set = RolloutDataset(rollouts=test_rollouts.dataset.rollouts)  # type: ignore
     eval_set = RolloutDataset(rollouts=eval_rollouts.dataset.rollouts)  # type: ignore
 
-    train_dataloader = RolloutDataloader(training_set, batch_size=1)
-    test_dataloader = RolloutDataloader(test_set, batch_size=1)
+    train_dataloader = RolloutDataloader(training_set, batch_size=64)
+    test_dataloader = RolloutDataloader(test_set, batch_size=64)
 
     vision = ConvVAE().from_pretrained().to(DEVICE)
-
+    memory = MDN_RNN().to(DEVICE)
+    memory_trainer = MemoryTrainer()
+    memory_trainer.train(
+        memory,
+        vision,
+        train_dataloader,
+        test_dataloader,
+        torch.optim.Adam(memory.parameters()),
+        epochs=5,
+    )
+    exit()
     memory = MDN_RNN().from_pretrained().to(DEVICE)
-    # memory_trainer = MemoryTrainer()
-
-    # memory_trainer.train(
-    #     memory,
-    #     vision,
-    #     train_dataloader,
-    #     test_dataloader,
-    #     torch.optim.Adam(memory.parameters()),
-    # )
     vision.eval()
     memory.eval()
-    observations, actions, _ = next(iter(test_dataloader))  # Get one batch
-    observations = observations.to(DEVICE)  # Shape: (timesteps, batch_size, C, H, W)
-    actions = actions.to(DEVICE)  # Shape: (timesteps, batch_size)
+    # Unpack the dataloader's batch
+    observations, actions, rewards = next(iter(test_dataloader))
 
-    # Process observations and actions
+    # Move tensors to the correct device
+    observations = observations.to(DEVICE)  # Shape: (batch_size, timesteps, 3, 64, 64)
+    actions = actions.to(DEVICE)  # Shape: (batch_size, timesteps)
+    rewards = rewards.to(DEVICE)  # Shape: (batch_size, timesteps)
+
+    # Iterate over timesteps (2nd dimension of the tensors)
+    batch_size, timesteps, _, _, _ = observations.shape
     hidden = None
     mdn_reconstructions = []
     vae_reconstructions = []
 
-    for timestep_observation, timestep_action in zip(observations, actions):
-        # Pass through the VAE to get the target latent
+    for t in range(timesteps):
+        # Extract the t-th timestep across the batch
+        timestep_observations = observations[
+            :, t, :, :, :
+        ]  # Shape: (batch_size, 3, 64, 64)
+        timestep_actions = actions[:, t]  # Shape: (batch_size,)
+
+        # Pass observations through the VAE to get target latents
         target_latent = vision.get_latent(
-            timestep_observation
+            timestep_observations
         )  # Shape: (batch_size, latent_dim)
 
-        # Pass through MDN_RNN
+        # Pass target latents and actions through the MDN_RNN
         pi, mu, sigma, hidden = memory(
-            target_latent, timestep_action, hidden
-        )  # Get MDN params
+            target_latent, timestep_actions, hidden
+        )  # MDN outputs
 
-        # Sample from the MDN
+        # Sample from the MDN to get the predicted latent vector
         sampled_latent = memory.sample_latent(pi, mu, sigma)
 
-        # Decode from the VAE
+        # Decode the target and sampled latents using the VAE
         vae_reconstruction = (
             vision.decoder(target_latent).detach().cpu()
-        )  # From target latent
+        )  # From VAE target latent
         mdn_reconstruction = (
             vision.decoder(sampled_latent).detach().cpu()
-        )  # From MDN latent
+        )  # From MDN sampled latent
 
-        vae_reconstructions.append(vae_reconstruction[0])  # Keep first batch image
-        mdn_reconstructions.append(mdn_reconstruction[0])  # Keep first batch image
+        vae_reconstructions.append(
+            vae_reconstruction[0]
+        )  # Keep the first sample in the batch
+        mdn_reconstructions.append(
+            mdn_reconstruction[0]
+        )  # Keep the first sample in the batch
 
-    # Convert to numpy for plotting
+    # Convert lists to tensors for plotting
     vae_reconstructions = torch.stack(
         vae_reconstructions
     ).numpy()  # Shape: (timesteps, C, H, W)
@@ -312,14 +368,13 @@ if __name__ == "__main__":
     ).numpy()  # Shape: (timesteps, C, H, W)
 
     # Plot the results
-    timesteps = len(vae_reconstructions)
     for t in range(timesteps):
         fig, axes = plt.subplots(1, 3, figsize=(12, 4))
 
         # Original Observation
         original = (
-            observations[t].permute(1, 2, 0).cpu().numpy()
-        )  # Permute for HWC format
+            observations[0, t].permute(1, 2, 0).cpu().numpy()
+        )  # First batch sample, permute to [H, W, C]
         axes[0].imshow(original)
         axes[0].set_title("Original Observation")
         axes[0].axis("off")
