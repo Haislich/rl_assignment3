@@ -1,11 +1,12 @@
+import os
 from pathlib import Path
-from numpy import mean
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-
 from dataset import RolloutDataloader, RolloutDataset
 from vision import ConvVAE
+
+DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
 
 # Credits:
@@ -73,7 +74,7 @@ class MDN_RNN(nn.Module):
         sigma = torch.exp(log_sigma)
         return pi, mu, sigma, hidden
 
-    def __loss(self, pi, mu, sigma, target):
+    def loss(self, pi, mu, sigma, target):
         # Expand target to match the dimensions of mu and sigma
         target = target.unsqueeze(1)  # Shape: (batch_size, 1, latent_dim)
         # Reshape mu and sigma to separate mixture components and latent dimensions
@@ -102,7 +103,7 @@ class MDN_RNN(nn.Module):
         # Negative log likelihood
         return -log_probs.mean()
 
-    def train(
+    def train_(
         self,
         dataloader: RolloutDataloader,
         conv_vae: ConvVAE,
@@ -143,7 +144,7 @@ class MDN_RNN(nn.Module):
                     optimizer.zero_grad()
                     target = conv_vae.get_latent(timestep_observation)
                     pi, mu, sigma, hidden = self(target, timestep_action, hidden)
-                    loss = self.__loss(pi, mu, sigma, target)
+                    loss = self.loss(pi, mu, sigma, target)
                     batch_loss += loss
             batch_loss.backward()
             optimizer.step()
@@ -152,25 +153,137 @@ class MDN_RNN(nn.Module):
         torch.save(self.state_dict(), Path("models") / "memory.pt")
 
 
+class MemoryTrainer:
+
+    def _train_step(
+        self,
+        memory: MDN_RNN,
+        vision: ConvVAE,
+        train_dataloader: RolloutDataloader,
+        optimizer: torch.optim.Optimizer,
+    ):
+        memory.train()
+        train_loss = 0
+        for batch_rollouts_observations, batch_rollouts_actions, _ in train_dataloader:
+            batch_rollouts_observations = batch_rollouts_observations.to(
+                next(memory.parameters()).device
+            )
+            batch_rollouts_observations = batch_rollouts_observations.permute(
+                1, 0, 2, 3, 4
+            )
+            batch_rollouts_actions = batch_rollouts_actions.to(
+                next(memory.parameters()).device
+            )
+            batch_rollouts_actions = batch_rollouts_actions.permute(1, 0)
+
+            optimizer.zero_grad()
+            batch_loss = torch.zeros([]).to(next(memory.parameters()).device)
+            hidden = None
+            for timestep_observation, timestep_action in zip(
+                batch_rollouts_observations, batch_rollouts_actions
+            ):
+                target = vision.get_latent(timestep_observation)
+                pi, mu, sigma, hidden = memory(target, timestep_action, hidden)
+                loss = memory.loss(pi, mu, sigma, target)
+                batch_loss += loss
+            batch_loss.backward()
+            optimizer.step()
+            train_loss += batch_loss.item()
+        train_loss = len(train_dataloader)
+        return train_loss
+
+    def _test_step(
+        self,
+        memory: MDN_RNN,
+        vision: ConvVAE,
+        test_dataloader: RolloutDataloader,
+    ):
+        memory.eval()
+        test_loss = 0
+        for batch_rollouts_observations, batch_rollouts_actions, _ in test_dataloader:
+            batch_rollouts_observations = batch_rollouts_observations.to(
+                next(memory.parameters()).device
+            )
+            batch_rollouts_observations = batch_rollouts_observations.permute(
+                1, 0, 2, 3, 4
+            )
+            batch_rollouts_actions = batch_rollouts_actions.to(
+                next(memory.parameters()).device
+            )
+            batch_rollouts_actions = batch_rollouts_actions.permute(1, 0)
+            batch_loss = torch.zeros([]).to(next(memory.parameters()).device)
+            hidden = None
+            for timestep_observation, timestep_action in zip(
+                batch_rollouts_observations, batch_rollouts_actions
+            ):
+
+                target = vision.get_latent(timestep_observation)
+                pi, mu, sigma, hidden = memory(target, timestep_action, hidden)
+                loss = memory.loss(pi, mu, sigma, target)
+                batch_loss += loss
+            test_loss += batch_loss.item()
+        test_loss /= len(test_dataloader)
+        return test_loss
+
+    def train(
+        self,
+        memory: MDN_RNN,
+        vision: ConvVAE,
+        train_dataloader: RolloutDataloader,
+        test_dataloader: RolloutDataloader,
+        optimizer: torch.optim.Optimizer,
+        epochs: int = 10,
+        save_path=Path("models") / "vision.pt",
+    ):
+        vision.eval()
+
+        for epoch in range(epochs):
+            train_loss = self._train_step(
+                memory,
+                vision,
+                train_dataloader,
+                optimizer,
+            )
+            test_loss = self._test_step(
+                memory,
+                vision,
+                test_dataloader,
+            )
+            print(f"Epoch {epoch} | {train_loss=} | {test_loss=}")
+        os.makedirs(save_path.parents[0], exist_ok=True)
+        torch.save(vision.state_dict(), save_path)
+
+
 if __name__ == "__main__":
     file_path = Path("data") / "dataset.pt"
-    device = "cuda" if torch.cuda.is_available() else "cpu"
+
     if file_path.exists():
         dataset = RolloutDataset.load(file_path=file_path)
     else:
         dataset = RolloutDataset(num_rollouts=10, max_steps=10)
         dataset.save(file_path=file_path)
-    dataloader = RolloutDataloader(dataset, 2)
-    vision = ConvVAE()  # .from_pretrained(file_path=Path("models/vision.pt"))
-    memory = MDN_RNN()
-    memory.train(dataloader, vision)
-    # for (
-    #     batch_rollouts_observations,
-    #     batch_rollouts_actions,
-    #     _,
-    # ) in dataloader:
-    #     latents = conv_vae.get_latents(batch_rollouts_observations)
-    #     print(f"{latents.shape=}")
-    #     memory = MDN_RNN()
-    #     print(f"{batch_rollouts_actions.shape}")
-    #     memory(latents, batch_rollouts_actions, None)
+
+    train_rollouts, test_rollouts, eval_rollouts = torch.utils.data.random_split(
+        dataset, [0.5, 0.3, 0.2]
+    )
+    # train_rollouts = cast(Subset[RolloutDataset], train_rollouts)
+    # test_rollouts = cast(Subset[RolloutDataset], test_rollouts)
+    # eval_rollouts = cast(Subset[RolloutDataset], eval_rollouts)
+    training_set = RolloutDataset(rollouts=train_rollouts.dataset.rollouts)  # type: ignore
+    test_set = RolloutDataset(rollouts=test_rollouts.dataset.rollouts)  # type: ignore
+    eval_set = RolloutDataset(rollouts=eval_rollouts.dataset.rollouts)  # type: ignore
+
+    train_dataloader = RolloutDataloader(training_set, 32)
+    test_dataloader = RolloutDataloader(test_set, 32)
+
+    vision = ConvVAE().from_pretrained(Path("models") / "vision.pt").to(DEVICE)
+    memory = MDN_RNN().to(DEVICE)
+    memory_trainer = MemoryTrainer()
+
+    memory_trainer.train(
+        memory,
+        vision,
+        train_dataloader,
+        test_dataloader,
+        torch.optim.Adam(vision.parameters()),
+    )

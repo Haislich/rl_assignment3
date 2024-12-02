@@ -22,6 +22,7 @@ class RolloutDataset(Dataset):
         max_steps=100,
         continuous=False,
         env_name="CarRacing-v2",
+        rollouts=None,
     ):
         self.env = gym.make(id=env_name, continuous=continuous)
         self.__transformation = transforms.Compose(
@@ -30,10 +31,10 @@ class RolloutDataset(Dataset):
                 transforms.ToTensor(),
             ]
         )
-        if max_steps > 0 and num_rollouts > 0:
-            self.rollouts, self.mean_length = self._collect_and_filter_rollouts(
-                num_rollouts, max_steps
-            )
+        if rollouts is not None:
+            self.rollouts = rollouts
+        else:
+            self.rollouts = self._collect_and_filter_rollouts(num_rollouts, max_steps)
 
     def _collect_and_filter_rollouts(self, num_rollouts, max_steps):
         """Collects rollouts, filters and truncates them to a mean length."""
@@ -83,7 +84,17 @@ class RolloutDataset(Dataset):
                     )
                 )
 
-        return filtered_rollouts, mean_length
+        return filtered_rollouts
+
+    def get_mean_length(self):
+        return int(
+            torch.tensor(
+                [len(rollout.observations) for rollout in self.rollouts],
+                dtype=torch.float32,
+            )
+            .mean()
+            .item()
+        )
 
     def save(self, file_path: Path):
         # Serialize rollouts and mean_length to a file
@@ -97,7 +108,6 @@ class RolloutDataset(Dataset):
                 }
                 for rollout in self.rollouts
             ],
-            "mean_length": self.mean_length,  # Save mean length
         }
         torch.save(data_to_save, file_path)
         print(f"Dataset saved to {file_path}")
@@ -114,12 +124,8 @@ class RolloutDataset(Dataset):
             )
             for data in loaded_data["rollouts"]
         ]
-        mean_length = loaded_data["mean_length"]  # Extract mean length
-
-        # Create an empty instance and set the loaded data
-        instance = cls(num_rollouts=0, max_steps=0)  # Create an empty instance
-        instance.rollouts = rollouts  # Set loaded rollouts
-        instance.mean_length = mean_length  # Set mean length
+        # Create an instance with the loaded data
+        instance = cls(num_rollouts=0, max_steps=0, rollouts=rollouts)
         return instance
 
     def __len__(self):
@@ -136,7 +142,7 @@ class RolloutDataloader(DataLoader):
         batch_size: int = 32,
         shuffle: bool = True,
     ):
-
+        self.dataset: RolloutDataset = dataset
         super().__init__(
             dataset=dataset,
             batch_size=batch_size,
@@ -156,6 +162,9 @@ class RolloutDataloader(DataLoader):
             batch_rollouts_actions,
             batch_rollouts_rewards,
         )
+
+    def __len__(self) -> int:
+        return len(self.dataset) * self.dataset.get_mean_length()
 
     def __iter__(self):
         for (

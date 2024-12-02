@@ -1,13 +1,15 @@
-import torch
-from torch import nn
-import torch.nn.functional as F
-import numpy as np
-
-# Test imports
-import matplotlib.pyplot as plt
-
-from dataset import Rollout, RolloutDataloader, RolloutDataset
+import os
 from pathlib import Path
+
+# TODO: Remove
+import matplotlib.pyplot as plt
+import torch
+import torch.nn.functional as F
+from torch import nn
+
+from dataset import RolloutDataloader  # , RolloutDataset
+
+DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
 
 class Encoder(nn.Module):
@@ -71,7 +73,6 @@ class ConvVAE(nn.Module):
         return reconstruction, mu, sigma
 
     def get_latent(self, observation: torch.Tensor) -> torch.Tensor:
-        latents = []
         mu, log_sigma = self.encoder(observation)
         sigma = log_sigma.exp()
         return mu + sigma * torch.randn_like(sigma)
@@ -95,53 +96,6 @@ class ConvVAE(nn.Module):
         # 0.5 * sum(1 + log(sigma^2) - mu^2 - sigma^2)
         kld = -0.5 * torch.sum(1 + 2 * log_sigma - mu.pow(2) - (2 * log_sigma).exp())
         return bce + kld
-
-    def train_and_test(self, dataloader: RolloutDataloader, epochs: int = 10):
-        super().train()
-        optimizer = torch.optim.Adam(self.parameters())
-
-        for epoch in range(epochs):
-            train_loss = 0
-            for batch_rollouts_observations, _, _ in dataloader:
-                # Move to the desired device, make device agnostic
-                batch_rollouts_observations = batch_rollouts_observations.to(
-                    next(self.parameters()).device
-                )
-                # Keep the original information about the shape
-                original_shape = batch_rollouts_observations.shape
-                # Make a long tensor containing all the observations
-                full_batch_observations = batch_rollouts_observations.reshape(
-                    batch_rollouts_observations.shape[0]
-                    * batch_rollouts_observations.shape[1],
-                    *batch_rollouts_observations.shape[2:],
-                )
-
-                # "break" the information relative to the sequentiality and shuffle
-
-                shuffled_indices = torch.randperm(full_batch_observations.shape[0])
-                shuffled_full_bro = full_batch_observations[shuffled_indices]
-                # Make the resulting shuffled observations a tensor of shape
-                # number of elements in an episode x batch_size x observation shape
-                shuffled_full_bro = shuffled_full_bro.reshape(
-                    original_shape[1], original_shape[0], *original_shape[2:]
-                )
-                # This will make ~max_episode iterations, depending on effectively the lenght of
-                # each episode
-                for batch_observations in shuffled_full_bro:
-                    optimizer.zero_grad()
-                    reconstruction, mu, log_sigma = self(batch_observations)
-                    loss = self.__loss(
-                        reconstruction, batch_observations, mu, log_sigma
-                    )
-                    loss.backward()
-                    # This loss is now relative to batch_size elements
-                    train_loss += loss.item() / shuffled_full_bro.shape[1]
-                    optimizer.step()
-                # Finally we normalize again because the previous loop was done
-                # on a number of elements equal to number of elements in an episode
-                train_loss /= shuffled_full_bro.shape[0]
-            print(f"Epoch {epoch+1} | loss {train_loss}")
-        torch.save(self.state_dict(), Path("models") / "vision.pt")
 
     @staticmethod
     def from_pretrained(file_path: Path):
@@ -196,29 +150,130 @@ class ConvVAE(nn.Module):
 
 
 class VisionTrainer:
-    def __init__(self, dataset: RolloutDataset) -> None:
-        self.training_set, self.test_set, self.validation_set = (
-            torch.utils.data.random_split(dataset, [0.5, 0.3, 0.2])
-        )
-    def _train_step(self,vision,dataloader, optimizer):
+
+    def _train_step(
+        self,
+        vision: ConvVAE,
+        train_dataloader: RolloutDataloader,
+        optimizer: torch.optim.Optimizer,
+    ):
         vision.train()
-        train_loss = 
-    def train(self, vision: ConvVAE, epochs:int, optimizer, savepath):
+
+        train_loss = 0
+        for batch_rollouts_observations, _, _ in train_dataloader:
+            # Move to the desired device, make device agnostic
+            batch_rollouts_observations = batch_rollouts_observations.to(
+                next(vision.parameters()).device
+            )
+
+            # Make a long tensor containing all the observations
+            batch_rollouts_observations = batch_rollouts_observations.permute(
+                1, 0, 2, 3, 4
+            )
+
+            # "break" the information relative to the sequentiality and shuffle
+
+            shuffled_indices = torch.randperm(batch_rollouts_observations.shape[0])
+            batch_rollouts_observations = batch_rollouts_observations[shuffled_indices]
+            # Make the resulting shuffled observations a tensor of shape
+            # number of elements in an episode x batch_size x observation shape
+            batch_rollouts_observations = batch_rollouts_observations.permute(
+                1, 0, 2, 3, 4
+            )
+            # This will make ~max_episode iterations, depending on effectively the lenght of
+            # each episode
+            for batch_observations in batch_rollouts_observations:
+
+                reconstruction, mu, log_sigma = vision(batch_observations)
+                loss = vision.loss(reconstruction, batch_observations, mu, log_sigma)
+                optimizer.zero_grad()
+                loss.backward()
+                # This loss is now relative to batch_size elements
+                optimizer.step()
+                train_loss += loss.item()
+        train_loss /= len(train_dataloader)
+        return train_loss
+
+    def _test_step(self, vision: ConvVAE, test_dataloader: RolloutDataloader):
+        vision.eval()
+        test_loss = 0
+        for batch_rollouts_observations, _, _ in test_dataloader:
+            # Move to the desired device, make device agnostic
+            batch_rollouts_observations = batch_rollouts_observations.to(
+                next(vision.parameters()).device
+            )
+
+            # Make a long tensor containing all the observations
+            batch_rollouts_observations = batch_rollouts_observations.permute(
+                1, 0, 2, 3, 4
+            )
+
+            # "break" the information relative to the sequentiality and shuffle
+
+            shuffled_indices = torch.randperm(batch_rollouts_observations.shape[0])
+            batch_rollouts_observations = batch_rollouts_observations[shuffled_indices]
+            # Make the resulting shuffled observations a tensor of shape
+            # number of elements in an episode x batch_size x observation shape
+            batch_rollouts_observations = batch_rollouts_observations.permute(
+                1, 0, 2, 3, 4
+            )
+            # This will make ~max_episode iterations, depending on effectively the lenght of
+            # each episode
+            for batch_observations in batch_rollouts_observations:
+                reconstruction, mu, log_sigma = vision(batch_observations)
+                loss = vision.loss(reconstruction, batch_observations, mu, log_sigma)
+                test_loss += loss.item()
+        test_loss /= len(test_dataloader)
+        return test_loss
+
+    def train(
+        self,
+        vision: ConvVAE,
+        train_dataloader: RolloutDataloader,
+        test_dataloader: RolloutDataloader,
+        optimizer: torch.optim.Optimizer,
+        epochs: int = 10,
+        save_path=Path("models") / "vision.pt",
+    ):
+        vision.to(DEVICE)
+
+        for epoch in range(epochs):
+            train_loss = self._train_step(vision, train_dataloader, optimizer)
+            test_loss = self._test_step(vision, test_dataloader)
+            print(f"Epoch {epoch} | {train_loss=} | {test_loss=}")
+        os.makedirs(save_path.parents[0], exist_ok=True)
+        torch.save(vision.state_dict(), save_path)
 
 
-if __name__ == "__main__":
-    file_path = Path("data") / "dataset.pt"
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    if file_path.exists():
-        dataset = RolloutDataset.load(file_path=file_path)
-    else:
-        dataset = RolloutDataset(num_rollouts=10, max_steps=10)
-        dataset.save(file_path=file_path)
+# if __name__ == "__main__":
+#     file_path = Path("data") / "dataset.pt"
 
-    dataloader = RolloutDataloader(dataset, 2)
+#     if file_path.exists():
+#         dataset = RolloutDataset.load(file_path=file_path)
+#     else:
+#         dataset = RolloutDataset(num_rollouts=10, max_steps=10)
+#         dataset.save(file_path=file_path)
 
-    conv_vae = ConvVAE().to(device)
-    conv_vae.train_and_test(
-        dataloader=dataloader,
-        epochs=20,
-    )
+#     train_rollouts, test_rollouts, eval_rollouts = torch.utils.data.random_split(
+#         dataset, [0.5, 0.3, 0.2]
+#     )
+#     # train_rollouts = cast(Subset[RolloutDataset], train_rollouts)
+#     # test_rollouts = cast(Subset[RolloutDataset], test_rollouts)
+#     # eval_rollouts = cast(Subset[RolloutDataset], eval_rollouts)
+#     training_set = RolloutDataset(rollouts=train_rollouts.dataset.rollouts)  # type: ignore
+#     test_set = RolloutDataset(rollouts=test_rollouts.dataset.rollouts)  # type: ignore
+#     eval_set = RolloutDataset(rollouts=eval_rollouts.dataset.rollouts)  # type: ignore
+
+#     train_dataloader = RolloutDataloader(training_set, 32)
+#     test_dataloader = RolloutDataloader(test_set, 32)
+
+#     vision = ConvVAE().to(DEVICE)
+
+#     vision_trainer = VisionTrainer()
+
+#     vision_trainer.train(
+#         vision,
+#         train_dataloader,
+#         test_dataloader,
+#         torch.optim.Adam(vision.parameters()),
+#     )
