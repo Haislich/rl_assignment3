@@ -1,12 +1,9 @@
 from dataclasses import dataclass
-from typing import Generator
 import gymnasium as gym
 from PIL import Image
-from torch.utils.data.dataloader import _BaseDataLoaderIter
 from torchvision import transforms
 import torch
 from torch.utils.data import Dataset, DataLoader
-import numpy as np
 from pathlib import Path
 import os
 
@@ -26,72 +23,88 @@ class RolloutDataset(Dataset):
         continuous=False,
         env_name="CarRacing-v2",
     ):
-        # TODO: Handle the discrete case
-        self.env = gym.make(id=env_name, continuous=continuous)  # ,render_mode="human")
-        self.max_steps = max_steps
+        self.env = gym.make(id=env_name, continuous=continuous)
         self.__transformation = transforms.Compose(
             [
                 transforms.Resize((64, 64)),
                 transforms.ToTensor(),
-                # transforms.Normalize([0.5, 0.5, 0.5], [0.5, 0.5, 0.5]),
             ]
         )
-        if num_rollouts > 0 and max_steps > 0:
-            self.rollouts = self._collect_rollouts(num_rollouts, max_steps)
-            self._filter_and_trucate_rollouts()
+        if max_steps > 0 and num_rollouts > 0:
+            self.rollouts, self.mean_length = self._collect_and_filter_rollouts(
+                num_rollouts, max_steps
+            )
 
-    def _collect_rollouts(self, num_rollouts, max_steps):
+    def _collect_and_filter_rollouts(self, num_rollouts, max_steps):
+        """Collects rollouts, filters and truncates them to a mean length."""
         data = []
-        for episode in range(num_rollouts):
-            if episode % 100 == 0:
-                print(f"Rollout {episode=}")
-            observations = []
-            actions = []
-            rewards = []
-            obs, _ = self.env.reset()
+        for rollout in range(num_rollouts):
+            print(f"Rollout {rollout}")
+            observations, actions, rewards = [], [], []
+            observation, _ = self.env.reset()
             for _ in range(max_steps):
-                action = self.env.action_space.sample()  # Random action
+                action = self.env.action_space.sample()
                 next_obs, reward, done, _, _ = self.env.step(action)
-                # obs = transforms.ToTensor()(
-                #     transforms.Resize((64, 64))(Image.fromarray(obs))
-                # ).permute(0, 1, 2)
-                obs = self.__transformation(Image.fromarray(obs))
-
-                observations.append(obs)
+                observation = self.__transformation(Image.fromarray(observation))
+                observations.append(observation)
                 actions.append(action)
                 rewards.append(reward)
-                obs = next_obs
-                # Simulate the lack of max_steps
-                # if np.random.rand() < 0.90:
-                #     break
+                observation = next_obs
+
                 if done:
                     break
 
+            # Convert to torch tensors
             observations = torch.stack(observations)
-            rewards = torch.Tensor(rewards)
-            actions = torch.Tensor(actions)
+            actions = torch.tensor(actions, dtype=torch.float32)
+            rewards = torch.tensor(rewards, dtype=torch.float32)
+
             data.append(
                 Rollout(observations=observations, actions=actions, rewards=rewards)
             )
-        return data
+
+        mean_length = int(
+            torch.tensor(
+                [len(rollout.observations) for rollout in data], dtype=torch.float32
+            )
+            .mean()
+            .item()
+        )
+
+        # Filter and truncate rollouts
+        filtered_rollouts = []
+        for rollout in data:
+            if len(rollout.observations) >= mean_length:
+                filtered_rollouts.append(
+                    Rollout(
+                        observations=rollout.observations[:mean_length],
+                        actions=rollout.actions[:mean_length],
+                        rewards=rollout.rewards[:mean_length],
+                    )
+                )
+
+        return filtered_rollouts, mean_length
 
     def save(self, file_path: Path):
-        # Serialize rollouts to a file
+        # Serialize rollouts and mean_length to a file
         os.makedirs(file_path.parents[0], exist_ok=True)
-        data_to_save = [
-            {
-                "observations": rollout.observations,
-                "actions": rollout.actions,
-                "rewards": rollout.rewards,
-            }
-            for rollout in self.rollouts
-        ]
+        data_to_save = {
+            "rollouts": [
+                {
+                    "observations": rollout.observations,
+                    "actions": rollout.actions,
+                    "rewards": rollout.rewards,
+                }
+                for rollout in self.rollouts
+            ],
+            "mean_length": self.mean_length,  # Save mean length
+        }
         torch.save(data_to_save, file_path)
         print(f"Dataset saved to {file_path}")
 
     @classmethod
     def load(cls, file_path):
-        # Load rollouts from a file
+        # Load rollouts and mean_length from a file
         loaded_data = torch.load(file_path, weights_only=True)
         rollouts = [
             Rollout(
@@ -99,34 +112,15 @@ class RolloutDataset(Dataset):
                 actions=data["actions"],
                 rewards=data["rewards"],
             )
-            for data in loaded_data
+            for data in loaded_data["rollouts"]
         ]
+        mean_length = loaded_data["mean_length"]  # Extract mean length
+
+        # Create an empty instance and set the loaded data
         instance = cls(num_rollouts=0, max_steps=0)  # Create an empty instance
         instance.rollouts = rollouts  # Set loaded rollouts
+        instance.mean_length = mean_length  # Set mean length
         return instance
-
-    def _filter_and_trucate_rollouts(
-        self,
-    ) -> None:
-        lengths = [len(rollout.observations) for rollout in self.rollouts]
-        mean_length = int(torch.tensor(lengths, dtype=torch.float32).mean().item())
-
-        # Filter and truncate rollouts
-        filtered_rollouts = []
-        for rollout in self.rollouts:
-            if len(rollout.observations) >= mean_length:
-                # Truncate observations, actions, and rewards to the mean length
-                truncated_observations = rollout.observations[:mean_length]
-                truncated_actions = rollout.actions[:mean_length]
-                truncated_rewards = rollout.rewards[:mean_length]
-                filtered_rollouts.append(
-                    Rollout(
-                        observations=truncated_observations,
-                        actions=truncated_actions,
-                        rewards=truncated_rewards,
-                    )
-                )
-        self.rollouts = filtered_rollouts
 
     def __len__(self):
         return len(self.rollouts)
@@ -142,7 +136,7 @@ class RolloutDataloader(DataLoader):
         batch_size: int = 32,
         shuffle: bool = True,
     ):
-        self.dataset = dataset
+
         super().__init__(
             dataset=dataset,
             batch_size=batch_size,

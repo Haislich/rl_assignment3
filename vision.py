@@ -70,8 +70,15 @@ class ConvVAE(nn.Module):
         reconstruction = self.decoder(z)
         return reconstruction, mu, sigma
 
+    def get_latent(self, observation: torch.Tensor) -> torch.Tensor:
+        latents = []
+        mu, log_sigma = self.encoder(observation)
+        sigma = log_sigma.exp()
+        return mu + sigma * torch.randn_like(sigma)
+
     def get_latents(self, observations: torch.Tensor) -> torch.Tensor:
         latents = []
+        print(f"{observations.shape=}")
         for observation in observations:
             mu, log_sigma = self.encoder(observation)
             sigma = log_sigma.exp()
@@ -80,7 +87,7 @@ class ConvVAE(nn.Module):
 
     # This was taken directly from the ofifcial pytorch example repository:
     # https://github.com/pytorch/examples/blob/1bef748fab064e2fc3beddcbda60fd51cb9612d2/vae/main.py#L81
-    def __loss(self, reconstruction, original, mu, log_sigma) -> torch.Tensor:
+    def loss(self, reconstruction, original, mu, log_sigma) -> torch.Tensor:
         bce = F.mse_loss(input=reconstruction, target=original, reduction="sum")
         # see Appendix B from VAE paper:
         # Kingma and Welling. Auto-Encoding Variational Bayes. ICLR, 2014
@@ -89,7 +96,7 @@ class ConvVAE(nn.Module):
         kld = -0.5 * torch.sum(1 + 2 * log_sigma - mu.pow(2) - (2 * log_sigma).exp())
         return bce + kld
 
-    def train(self, dataloader: RolloutDataloader, epochs: int = 10):
+    def train_and_test(self, dataloader: RolloutDataloader, epochs: int = 10):
         super().train()
         optimizer = torch.optim.Adam(self.parameters())
 
@@ -188,21 +195,30 @@ class ConvVAE(nn.Module):
         plt.show()
 
 
+class VisionTrainer:
+    def __init__(self, dataset: RolloutDataset) -> None:
+        self.training_set, self.test_set, self.validation_set = (
+            torch.utils.data.random_split(dataset, [0.5, 0.3, 0.2])
+        )
+    def _train_step(self,vision,dataloader, optimizer):
+        vision.train()
+        train_loss = 
+    def train(self, vision: ConvVAE, epochs:int, optimizer, savepath):
+
+
 if __name__ == "__main__":
     file_path = Path("data") / "dataset.pt"
     device = "cuda" if torch.cuda.is_available() else "cpu"
     if file_path.exists():
         dataset = RolloutDataset.load(file_path=file_path)
     else:
-        dataset = RolloutDataset(num_rollouts=1000, max_steps=500)
+        dataset = RolloutDataset(num_rollouts=10, max_steps=10)
         dataset.save(file_path=file_path)
 
-    dataloader = RolloutDataloader(dataset, 32)
+    dataloader = RolloutDataloader(dataset, 2)
 
     conv_vae = ConvVAE().to(device)
-    conv_vae.train(
+    conv_vae.train_and_test(
         dataloader=dataloader,
         epochs=20,
     )
-    for observation in dataset[0].observations:
-        conv_vae._check(observation.unsqueeze(0))

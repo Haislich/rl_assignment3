@@ -1,4 +1,5 @@
 from pathlib import Path
+from numpy import mean
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -34,7 +35,7 @@ class MDN_RNN(nn.Module):
         self.fc_mu = nn.Linear(hidden_units, num_mixtures * latent_dimension)
         self.fc_log_sigma = nn.Linear(hidden_units, num_mixtures * latent_dimension)
 
-    def forward(self, latents, actions, hidden, temperature=None) -> tuple[
+    def forward(self, latents, actions, hidden, temperature=1.0) -> tuple[
         torch.Tensor,
         torch.Tensor,
         torch.Tensor,
@@ -75,10 +76,16 @@ class MDN_RNN(nn.Module):
     def __loss(self, pi, mu, sigma, target):
         # Expand target to match the dimensions of mu and sigma
         target = target.unsqueeze(1)  # Shape: (batch_size, 1, latent_dim)
+        # Reshape mu and sigma to separate mixture components and latent dimensions
+        batch_size = target.size(0)
+        num_mixtures = self.num_mixtures
+        latent_dim = target.size(-1)
 
+        # Reshape mu and sigma to [batch_size, num_mixtures, latent_dimension]
+        mu = mu.view(batch_size, num_mixtures, latent_dim)
+        sigma = sigma.view(batch_size, num_mixtures, latent_dim)
         # Create normal distributions for each mixture component
         normal = torch.distributions.Normal(loc=mu, scale=sigma)
-
         # Compute log probabilities for each component
         log_probs = normal.log_prob(
             target
@@ -102,48 +109,46 @@ class MDN_RNN(nn.Module):
         epochs: int = 10,
     ):
         super().train()
+        conv_vae.eval()
         optimizer = torch.optim.Adam(self.parameters())
 
         for epoch in range(epochs):
-            train_loss = 0
-            for batch_rollouts_observations, _, _ in dataloader:
-                # Move to the desired device, make device agnostic
+            epoch_loss = 0
+            hidden = None
+            for batch_rollouts_observations, batch_rollouts_actions, _ in dataloader:
                 batch_rollouts_observations = batch_rollouts_observations.to(
                     next(self.parameters()).device
                 )
-                # Keep the original information about the shape
-                original_shape = batch_rollouts_observations.shape
-                # Make a long tensor containing all the observations
-                full_batch_observations = batch_rollouts_observations.reshape(
-                    batch_rollouts_observations.shape[0]
-                    * batch_rollouts_observations.shape[1],
+                batch_rollouts_observations = batch_rollouts_observations.reshape(
+                    batch_rollouts_observations.shape[1],
+                    batch_rollouts_observations.shape[0],
                     *batch_rollouts_observations.shape[2:],
                 )
-
-                # "break" the information relative to the sequentiality and shuffle
-                shuffled_indices = torch.randperm(full_batch_observations.shape[0])
-                shuffled_full_bro = full_batch_observations[shuffled_indices]
-                # Make the resulting shuffled observations a tensor of shape
-                # number of elements in an episode x batch_size x observation shape
-                shuffled_full_bro = shuffled_full_bro.reshape(
-                    original_shape[1], original_shape[0], *original_shape[2:]
+                batch_rollouts_actions = batch_rollouts_actions.to(
+                    next(self.parameters()).device
                 )
-                # This will make ~max_episode iterations, depending on effectively the lenght of
-                # each episode
-                for batch_observations in shuffled_full_bro:
+                batch_rollouts_actions = batch_rollouts_actions.reshape(
+                    batch_rollouts_actions.shape[1],
+                    batch_rollouts_actions.shape[0],
+                    *batch_rollouts_actions.shape[2:],
+                )
+
+                optimizer.zero_grad()
+                batch_loss = torch.zeros([])
+                hidden = None
+                for timestep_observation, timestep_action in zip(
+                    batch_rollouts_observations, batch_rollouts_actions
+                ):
+
                     optimizer.zero_grad()
-                    reconstruction, mu, log_sigma = self(batch_observations)
-                    loss = self.__loss(
-                        reconstruction, batch_observations, mu, log_sigma
-                    )
-                    loss.backward()
-                    # This loss is now relative to batch_size elements
-                    train_loss += loss.item() / shuffled_full_bro.shape[1]
-                    optimizer.step()
-                # Finally we normalize again because the previous loop was done
-                # on a number of elements equal to number of elements in an episode
-                train_loss /= shuffled_full_bro.shape[0]
-            print(f"Epoch {epoch+1} | loss {train_loss}")
+                    target = conv_vae.get_latent(timestep_observation)
+                    pi, mu, sigma, hidden = self(target, timestep_action, hidden)
+                    loss = self.__loss(pi, mu, sigma, target)
+                    batch_loss += loss
+            batch_loss.backward()
+            optimizer.step()
+            epoch_loss += batch_loss.item()
+
         torch.save(self.state_dict(), Path("models") / "memory.pt")
 
 
@@ -153,17 +158,19 @@ if __name__ == "__main__":
     if file_path.exists():
         dataset = RolloutDataset.load(file_path=file_path)
     else:
-        dataset = RolloutDataset(num_rollouts=1000, max_steps=500)
+        dataset = RolloutDataset(num_rollouts=10, max_steps=10)
         dataset.save(file_path=file_path)
-    dataloader = RolloutDataloader(dataset, 32)
-    conv_vae = ConvVAE()  # .from_pretrained(file_path=Path("models/vision.pt"))
-    for (
-        batch_rollouts_observations,
-        batch_rollouts_actions,
-        _,
-    ) in dataloader:
-        latents = conv_vae.get_latents(batch_rollouts_observations)
-        print(f"{latents.shape=}")
-        memory = MDN_RNN()
-        print(f"{batch_rollouts_actions.shape}")
-        memory(latents, batch_rollouts_actions, None)
+    dataloader = RolloutDataloader(dataset, 2)
+    vision = ConvVAE()  # .from_pretrained(file_path=Path("models/vision.pt"))
+    memory = MDN_RNN()
+    memory.train(dataloader, vision)
+    # for (
+    #     batch_rollouts_observations,
+    #     batch_rollouts_actions,
+    #     _,
+    # ) in dataloader:
+    #     latents = conv_vae.get_latents(batch_rollouts_observations)
+    #     print(f"{latents.shape=}")
+    #     memory = MDN_RNN()
+    #     print(f"{batch_rollouts_actions.shape}")
+    #     memory(latents, batch_rollouts_actions, None)
