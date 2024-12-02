@@ -6,6 +6,8 @@ import torch
 from torch.utils.data import Dataset, DataLoader
 from pathlib import Path
 import os
+from concurrent.futures import ProcessPoolExecutor
+from functools import partial
 
 
 @dataclass
@@ -33,37 +35,42 @@ class RolloutDataset(Dataset):
         )
         if rollouts is not None:
             self.rollouts = rollouts
+            self.max_steps = self.get_mean_length()
         else:
-            self.rollouts = self._collect_and_filter_rollouts(num_rollouts, max_steps)
+            self.max_steps = max_steps
+            self.rollouts = self._collect_and_filter_rollouts(num_rollouts)
 
-    def _collect_and_filter_rollouts(self, num_rollouts, max_steps):
-        """Collects rollouts, filters and truncates them to a mean length."""
-        data = []
-        for rollout in range(num_rollouts):
-            print(f"Rollout {rollout}")
-            observations, actions, rewards = [], [], []
-            observation, _ = self.env.reset()
-            for _ in range(max_steps):
-                action = self.env.action_space.sample()
-                next_obs, reward, done, _, _ = self.env.step(action)
-                observation = self.__transformation(Image.fromarray(observation))
-                observations.append(observation)
-                actions.append(action)
-                rewards.append(reward)
-                observation = next_obs
+    def _collect_single_rollout(self, _=None):
+        """Collects a single rollout."""
+        observations, actions, rewards = [], [], []
+        observation, _ = self.env.reset()
+        for _ in range(self.max_steps):
+            action = self.env.action_space.sample()
+            next_obs, reward, done, _, _ = self.env.step(action)
+            observation = self.__transformation(Image.fromarray(observation))
+            observations.append(observation)
+            actions.append(action)
+            rewards.append(reward)
+            observation = next_obs
 
-                if done:
-                    break
+            if done:
+                break
 
-            # Convert to torch tensors
-            observations = torch.stack(observations)
-            actions = torch.tensor(actions, dtype=torch.float32)
-            rewards = torch.tensor(rewards, dtype=torch.float32)
+        # Convert to torch tensors
+        observations = torch.stack(observations)
+        actions = torch.tensor(actions, dtype=torch.float32)
+        rewards = torch.tensor(rewards, dtype=torch.float32)
 
-            data.append(
-                Rollout(observations=observations, actions=actions, rewards=rewards)
-            )
+        return Rollout(observations=observations, actions=actions, rewards=rewards)
 
+    def _collect_and_filter_rollouts(self, num_rollouts):
+        """Collects rollouts in parallel, filters and truncates them to a mean length."""
+
+        # Use ProcessPoolExecutor for parallel rollouts
+        with ProcessPoolExecutor() as executor:
+            data = list(executor.map(self._collect_single_rollout, range(num_rollouts)))
+
+        # Calculate the mean length of rollouts
         mean_length = int(
             torch.tensor(
                 [len(rollout.observations) for rollout in data], dtype=torch.float32
@@ -143,6 +150,7 @@ class RolloutDataloader(DataLoader):
         shuffle: bool = True,
     ):
         self.dataset: RolloutDataset = dataset
+        self.batch_size = batch_size
         super().__init__(
             dataset=dataset,
             batch_size=batch_size,

@@ -1,13 +1,11 @@
 import os
 from pathlib import Path
-
-# TODO: Remove
 import matplotlib.pyplot as plt
 import torch
 import torch.nn.functional as F
 from torch import nn
 
-from dataset import RolloutDataloader  # , RolloutDataset
+from dataset import RolloutDataloader, RolloutDataset
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
@@ -98,7 +96,7 @@ class ConvVAE(nn.Module):
         return bce + kld
 
     @staticmethod
-    def from_pretrained(file_path: Path):
+    def from_pretrained(file_path: Path = Path("models") / "vision.pt"):
         loaded_data = torch.load(file_path, weights_only=False)
         conv_vae = ConvVAE()
         conv_vae.load_state_dict(loaded_data)
@@ -245,35 +243,35 @@ class VisionTrainer:
         torch.save(vision.state_dict(), save_path)
 
 
-# if __name__ == "__main__":
-#     file_path = Path("data") / "dataset.pt"
+if __name__ == "__main__":
+    file_path = Path("data") / "dataset.pt"
 
-#     if file_path.exists():
-#         dataset = RolloutDataset.load(file_path=file_path)
-#     else:
-#         dataset = RolloutDataset(num_rollouts=10, max_steps=10)
-#         dataset.save(file_path=file_path)
+    if file_path.exists():
+        dataset = RolloutDataset.load(file_path=file_path)
+    else:
+        dataset = RolloutDataset(num_rollouts=10, max_steps=10)
+        dataset.save(file_path=file_path)
 
-#     train_rollouts, test_rollouts, eval_rollouts = torch.utils.data.random_split(
-#         dataset, [0.5, 0.3, 0.2]
-#     )
-#     # train_rollouts = cast(Subset[RolloutDataset], train_rollouts)
-#     # test_rollouts = cast(Subset[RolloutDataset], test_rollouts)
-#     # eval_rollouts = cast(Subset[RolloutDataset], eval_rollouts)
-#     training_set = RolloutDataset(rollouts=train_rollouts.dataset.rollouts)  # type: ignore
-#     test_set = RolloutDataset(rollouts=test_rollouts.dataset.rollouts)  # type: ignore
-#     eval_set = RolloutDataset(rollouts=eval_rollouts.dataset.rollouts)  # type: ignore
+    train_rollouts, test_rollouts, eval_rollouts = torch.utils.data.random_split(
+        dataset, [0.5, 0.3, 0.2]
+    )
+    # train_rollouts = cast(Subset[RolloutDataset], train_rollouts)
+    # test_rollouts = cast(Subset[RolloutDataset], test_rollouts)
+    # eval_rollouts = cast(Subset[RolloutDataset], eval_rollouts)
+    training_set = RolloutDataset(rollouts=train_rollouts.dataset.rollouts)  # type: ignore
+    test_set = RolloutDataset(rollouts=test_rollouts.dataset.rollouts)  # type: ignore
+    eval_set = RolloutDataset(rollouts=eval_rollouts.dataset.rollouts)  # type: ignore
 
-#     train_dataloader = RolloutDataloader(training_set, 32)
-#     test_dataloader = RolloutDataloader(test_set, 32)
+    train_dataloader = RolloutDataloader(training_set, 64)
+    test_dataloader = RolloutDataloader(test_set, 64)
 
-#     vision = ConvVAE().to(DEVICE)
+    vision = ConvVAE().to(DEVICE)
 
-#     vision_trainer = VisionTrainer()
+    vision_trainer = VisionTrainer()
 
-#     vision_trainer.train(
-#         vision,
-#         train_dataloader,
-#         test_dataloader,
-#         torch.optim.Adam(vision.parameters()),
-#     )
+    vision_trainer.train(
+        vision,
+        train_dataloader,
+        test_dataloader,
+        torch.optim.Adam(vision.parameters()),
+    )

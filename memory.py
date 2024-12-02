@@ -1,10 +1,11 @@
 import os
 from pathlib import Path
 import torch
-import torch.nn as nn
+from torch import nn
 import torch.nn.functional as F
 from dataset import RolloutDataloader, RolloutDataset
 from vision import ConvVAE
+import matplotlib.pyplot as plt
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
@@ -18,6 +19,7 @@ class MDN_RNN(nn.Module):
         super().__init__()
         self.hidden_dim = hidden_units
         self.num_mixtures = num_mixtures
+        self.latent_dimension = latent_dimension
         self.action_embedding = nn.Embedding(6, latent_dimension)
         # The *2 is not taken from the original paper, the idea is the following.
         # We want to condition the latent on the actions, however while latents have 32 dimensions
@@ -79,12 +81,10 @@ class MDN_RNN(nn.Module):
         target = target.unsqueeze(1)  # Shape: (batch_size, 1, latent_dim)
         # Reshape mu and sigma to separate mixture components and latent dimensions
         batch_size = target.size(0)
-        num_mixtures = self.num_mixtures
-        latent_dim = target.size(-1)
 
         # Reshape mu and sigma to [batch_size, num_mixtures, latent_dimension]
-        mu = mu.view(batch_size, num_mixtures, latent_dim)
-        sigma = sigma.view(batch_size, num_mixtures, latent_dim)
+        mu = mu.view(batch_size, self.num_mixtures, self.latent_dimension)
+        sigma = sigma.view(batch_size, self.num_mixtures, self.latent_dimension)
         # Create normal distributions for each mixture component
         normal = torch.distributions.Normal(loc=mu, scale=sigma)
         # Compute log probabilities for each component
@@ -99,62 +99,41 @@ class MDN_RNN(nn.Module):
         log_probs = torch.logsumexp(
             torch.log(pi) + log_probs, dim=-1
         )  # Shape: (batch_size)
-
         # Negative log likelihood
         return -log_probs.mean()
 
-    def train_(
-        self,
-        dataloader: RolloutDataloader,
-        conv_vae: ConvVAE,
-        epochs: int = 10,
-    ):
-        super().train()
-        conv_vae.eval()
-        optimizer = torch.optim.Adam(self.parameters())
+    def sample_latent(self, pi, mu, sigma):
+        batch_size = mu.size(0)
 
-        for epoch in range(epochs):
-            epoch_loss = 0
-            hidden = None
-            for batch_rollouts_observations, batch_rollouts_actions, _ in dataloader:
-                batch_rollouts_observations = batch_rollouts_observations.to(
-                    next(self.parameters()).device
-                )
-                batch_rollouts_observations = batch_rollouts_observations.reshape(
-                    batch_rollouts_observations.shape[1],
-                    batch_rollouts_observations.shape[0],
-                    *batch_rollouts_observations.shape[2:],
-                )
-                batch_rollouts_actions = batch_rollouts_actions.to(
-                    next(self.parameters()).device
-                )
-                batch_rollouts_actions = batch_rollouts_actions.reshape(
-                    batch_rollouts_actions.shape[1],
-                    batch_rollouts_actions.shape[0],
-                    *batch_rollouts_actions.shape[2:],
-                )
+        mu = mu.view(batch_size, self.latent_dimension, self.num_mixtures)
+        sigma = sigma.view(batch_size, self.latent_dimension, self.num_mixtures)
 
-                optimizer.zero_grad()
-                batch_loss = torch.zeros([])
-                hidden = None
-                for timestep_observation, timestep_action in zip(
-                    batch_rollouts_observations, batch_rollouts_actions
-                ):
+        # Sample a mixture component index for each item in the batch
+        categorical = torch.distributions.Categorical(pi)
+        mixture_indices = categorical.sample()  # Shape: (batch_size,)
+        # Expand mixture_indices for latent_dimension
+        mixture_indices = mixture_indices.unsqueeze(1).expand(-1, self.latent_dimension)
 
-                    optimizer.zero_grad()
-                    target = conv_vae.get_latent(timestep_observation)
-                    pi, mu, sigma, hidden = self(target, timestep_action, hidden)
-                    loss = self.loss(pi, mu, sigma, target)
-                    batch_loss += loss
-            batch_loss.backward()
-            optimizer.step()
-            epoch_loss += batch_loss.item()
+        # Gather the corresponding mu and sigma for the selected mixture component
+        selected_mu = torch.gather(mu, 2, mixture_indices.unsqueeze(-1)).squeeze(-1)
+        selected_sigma = torch.gather(sigma, 2, mixture_indices.unsqueeze(-1)).squeeze(
+            -1
+        )
 
-        torch.save(self.state_dict(), Path("models") / "memory.pt")
+        # Sample from the Gaussian defined by selected_mu and selected_sigma
+        normal = torch.distributions.Normal(selected_mu, selected_sigma)
+        sampled_latent = normal.rsample()  # Shape: (batch_size, latent_dim)
+        return sampled_latent
+
+    @staticmethod
+    def from_pretrained(file_path: Path = Path("models") / "memory.pt"):
+        loaded_data = torch.load(file_path, weights_only=False)
+        mdn_rnn = MDN_RNN()
+        mdn_rnn.load_state_dict(loaded_data)
+        return mdn_rnn
 
 
 class MemoryTrainer:
-
     def _train_step(
         self,
         memory: MDN_RNN,
@@ -176,20 +155,23 @@ class MemoryTrainer:
             )
             batch_rollouts_actions = batch_rollouts_actions.permute(1, 0)
 
-            optimizer.zero_grad()
             batch_loss = torch.zeros([]).to(next(memory.parameters()).device)
             hidden = None
+
             for timestep_observation, timestep_action in zip(
                 batch_rollouts_observations, batch_rollouts_actions
             ):
                 target = vision.get_latent(timestep_observation)
                 pi, mu, sigma, hidden = memory(target, timestep_action, hidden)
+                rnn_latent = memory.sample_latent(pi, mu, sigma)
                 loss = memory.loss(pi, mu, sigma, target)
                 batch_loss += loss
+
+            optimizer.zero_grad()
             batch_loss.backward()
             optimizer.step()
             train_loss += batch_loss.item()
-        train_loss = len(train_dataloader)
+        train_loss /= len(train_dataloader)
         return train_loss
 
     def _test_step(
@@ -233,7 +215,7 @@ class MemoryTrainer:
         test_dataloader: RolloutDataloader,
         optimizer: torch.optim.Optimizer,
         epochs: int = 10,
-        save_path=Path("models") / "vision.pt",
+        save_path=Path("models") / "memory.pt",
     ):
         vision.eval()
 
@@ -251,7 +233,7 @@ class MemoryTrainer:
             )
             print(f"Epoch {epoch} | {train_loss=} | {test_loss=}")
         os.makedirs(save_path.parents[0], exist_ok=True)
-        torch.save(vision.state_dict(), save_path)
+        torch.save(memory.state_dict(), save_path)
 
 
 if __name__ == "__main__":
@@ -260,30 +242,99 @@ if __name__ == "__main__":
     if file_path.exists():
         dataset = RolloutDataset.load(file_path=file_path)
     else:
-        dataset = RolloutDataset(num_rollouts=10, max_steps=10)
+        dataset = RolloutDataset(num_rollouts=1000, max_steps=200)
         dataset.save(file_path=file_path)
 
     train_rollouts, test_rollouts, eval_rollouts = torch.utils.data.random_split(
         dataset, [0.5, 0.3, 0.2]
     )
-    # train_rollouts = cast(Subset[RolloutDataset], train_rollouts)
-    # test_rollouts = cast(Subset[RolloutDataset], test_rollouts)
-    # eval_rollouts = cast(Subset[RolloutDataset], eval_rollouts)
     training_set = RolloutDataset(rollouts=train_rollouts.dataset.rollouts)  # type: ignore
     test_set = RolloutDataset(rollouts=test_rollouts.dataset.rollouts)  # type: ignore
     eval_set = RolloutDataset(rollouts=eval_rollouts.dataset.rollouts)  # type: ignore
 
-    train_dataloader = RolloutDataloader(training_set, 32)
-    test_dataloader = RolloutDataloader(test_set, 32)
+    train_dataloader = RolloutDataloader(training_set, batch_size=1)
+    test_dataloader = RolloutDataloader(test_set, batch_size=1)
 
-    vision = ConvVAE().from_pretrained(Path("models") / "vision.pt").to(DEVICE)
-    memory = MDN_RNN().to(DEVICE)
-    memory_trainer = MemoryTrainer()
+    vision = ConvVAE().from_pretrained().to(DEVICE)
 
-    memory_trainer.train(
-        memory,
-        vision,
-        train_dataloader,
-        test_dataloader,
-        torch.optim.Adam(vision.parameters()),
-    )
+    memory = MDN_RNN().from_pretrained().to(DEVICE)
+    # memory_trainer = MemoryTrainer()
+
+    # memory_trainer.train(
+    #     memory,
+    #     vision,
+    #     train_dataloader,
+    #     test_dataloader,
+    #     torch.optim.Adam(memory.parameters()),
+    # )
+    vision.eval()
+    memory.eval()
+    observations, actions, _ = next(iter(test_dataloader))  # Get one batch
+    observations = observations.to(DEVICE)  # Shape: (timesteps, batch_size, C, H, W)
+    actions = actions.to(DEVICE)  # Shape: (timesteps, batch_size)
+
+    # Process observations and actions
+    hidden = None
+    mdn_reconstructions = []
+    vae_reconstructions = []
+
+    for timestep_observation, timestep_action in zip(observations, actions):
+        # Pass through the VAE to get the target latent
+        target_latent = vision.get_latent(
+            timestep_observation
+        )  # Shape: (batch_size, latent_dim)
+
+        # Pass through MDN_RNN
+        pi, mu, sigma, hidden = memory(
+            target_latent, timestep_action, hidden
+        )  # Get MDN params
+
+        # Sample from the MDN
+        sampled_latent = memory.sample_latent(pi, mu, sigma)
+
+        # Decode from the VAE
+        vae_reconstruction = (
+            vision.decoder(target_latent).detach().cpu()
+        )  # From target latent
+        mdn_reconstruction = (
+            vision.decoder(sampled_latent).detach().cpu()
+        )  # From MDN latent
+
+        vae_reconstructions.append(vae_reconstruction[0])  # Keep first batch image
+        mdn_reconstructions.append(mdn_reconstruction[0])  # Keep first batch image
+
+    # Convert to numpy for plotting
+    vae_reconstructions = torch.stack(
+        vae_reconstructions
+    ).numpy()  # Shape: (timesteps, C, H, W)
+    mdn_reconstructions = torch.stack(
+        mdn_reconstructions
+    ).numpy()  # Shape: (timesteps, C, H, W)
+
+    # Plot the results
+    timesteps = len(vae_reconstructions)
+    for t in range(timesteps):
+        fig, axes = plt.subplots(1, 3, figsize=(12, 4))
+
+        # Original Observation
+        original = (
+            observations[t].permute(1, 2, 0).cpu().numpy()
+        )  # Permute for HWC format
+        axes[0].imshow(original)
+        axes[0].set_title("Original Observation")
+        axes[0].axis("off")
+
+        # VAE Reconstruction
+        vae_image = vae_reconstructions[t].transpose(1, 2, 0)  # Convert to HWC
+        axes[1].imshow(vae_image)
+        axes[1].set_title("VAE Reconstruction")
+        axes[1].axis("off")
+
+        # MDN Reconstruction
+        mdn_image = mdn_reconstructions[t].transpose(1, 2, 0)  # Convert to HWC
+        axes[2].imshow(mdn_image)
+        axes[2].set_title("MDN Reconstruction")
+        axes[2].axis("off")
+
+        plt.tight_layout()
+        plt.show()
