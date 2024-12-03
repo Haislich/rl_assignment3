@@ -6,6 +6,7 @@ import torch.nn.functional as F
 from dataset import RolloutDataloader, RolloutDataset
 from vision import ConvVAE
 import matplotlib.pyplot as plt
+from PIL import Image
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
@@ -45,8 +46,7 @@ class MDN_RNN(nn.Module):
     ]:
 
         # actions = self.action_embedding(actions.long())
-
-        actions = actions.unsqueeze(1)
+        actions = actions.unsqueeze(-1)
         rnn_out, hidden = self.rnn(
             torch.cat(
                 [latents, actions],
@@ -56,9 +56,9 @@ class MDN_RNN(nn.Module):
         )
 
         # MDN layer: outputs mixture weights (pi), means (mu), variances (sigma)
-        pi = self.fc_pi(hidden[0][-1])  # Use the final layer's hidden state
-        mu = self.fc_mu(hidden[0][-1])
-        log_sigma = self.fc_log_sigma(hidden[0][-1])
+        pi = self.fc_pi(rnn_out)  # Use the final layer's hidden state
+        mu = self.fc_mu(rnn_out)
+        log_sigma = self.fc_log_sigma(rnn_out)
 
         # As described in: https://arxiv.org/pdf/1308.0850 (19,20)
         # The mixture weight outputs are normalised with a softmax
@@ -80,10 +80,14 @@ class MDN_RNN(nn.Module):
         return pi, mu, sigma, hidden
 
     def loss(self, pi, mu, sigma, target):
-        target = target.unsqueeze(1)  # Shape: (batch_size, 1, latent_dim)
-        batch_size = target.size(0)
-        mu = mu.view(batch_size, self.num_mixtures, self.latent_dimension)
-        sigma = sigma.view(batch_size, self.num_mixtures, self.latent_dimension)
+
+        batch_size = target.shape[0]
+        seq_len = target.shape[1]
+        mu = mu.view(batch_size, seq_len, self.num_mixtures, self.latent_dimension)
+        sigma = sigma.view(
+            batch_size, seq_len, self.num_mixtures, self.latent_dimension
+        )
+        target = target.unsqueeze(2).expand(-1, -1, mu.shape[2], -1)
 
         # Stabilize sigma
         sigma = torch.clamp(sigma, min=1e-8)
@@ -98,9 +102,9 @@ class MDN_RNN(nn.Module):
 
         # Compute log-sum-exp
         log_probs = log_pi + log_probs
-        log_probs = torch.logsumexp(log_probs, dim=-1)  # Shape: (batch_size)
+        log_probs = -torch.logsumexp(log_probs, dim=-1)  # Shape: (batch_size)
 
-        return -log_probs.mean()
+        return log_probs.mean()
 
     def sample_latent(self, pi, mu, sigma):
         batch_size = mu.size(0)
@@ -143,72 +147,50 @@ class MemoryTrainer:
     ):
         memory.train()
         train_loss = 0
+        hidden = None
         for batch_rollouts_observations, batch_rollouts_actions, _ in train_dataloader:
+
             # Move data to the correct device and reshape
             batch_rollouts_observations = batch_rollouts_observations.to(
                 next(memory.parameters()).device
-            ).permute(
-                1, 0, 2, 3, 4
-            )  # Shape: (seq_len, batch, obs_shape)
+            )
             batch_rollouts_actions = batch_rollouts_actions.to(
                 next(memory.parameters()).device
-            ).permute(
-                1, 0
-            )  # Shape: (seq_len, batch)
+            )
 
             # Precompute latent vectors for the entire sequence
-            latent_vectors = [
-                vision.get_latent(obs) for obs in batch_rollouts_observations
-            ]  # List of tensors (seq_len, batch, latent_dim)
+            latent_vectors = vision.get_latents(batch_rollouts_observations)
 
             batch_loss = torch.zeros([]).to(next(memory.parameters()).device)
-            hidden = None  # Initialize hidden state
 
-            # Loop through sequence
-            for idx in range(0, batch_rollouts_actions.shape[0] - 1):
-                timestep_action = batch_rollouts_actions[idx]
-                target = latent_vectors[idx + 1]  # Next latent vector
+            target = latent_vectors[:, 1:, :]  # Next latent vector
 
-                # Predict using MDN-RNN
-                pi, mu, sigma, hidden = memory(
-                    latent_vectors[idx], timestep_action, hidden
-                )
+            # Predict using MDN-RNN
+            pi, mu, sigma, _ = memory(
+                latent_vectors[:, :-1], batch_rollouts_actions[:, :-1], hidden
+            )
 
-                # Compute loss
-                loss = memory.loss(pi, mu, sigma, target)
-                batch_loss += loss
-
-                # Logging (optional)
-                if idx % 10 == 0:  # Log every 10 steps
-                    print(
-                        f"Step {idx}: pi mean={pi.mean().item():.5f}, std={pi.std().item():.5f}"
-                    )
-                    print(f"mu mean={mu.mean().item():.5f}, std={mu.std().item():.5f}")
-                    print(
-                        f"sigma mean={sigma.mean().item():.5f}, std={sigma.std().item():.5f}"
-                    )
-
-            # Normalize loss by sequence length
-            batch_loss /= batch_rollouts_actions.shape[0] - 1
+            # Compute loss
+            loss = memory.loss(pi, mu, sigma, target)
 
             # Backpropagation
             optimizer.zero_grad()
-            batch_loss.backward()
+            loss.backward()
 
             # Gradient clipping
             torch.nn.utils.clip_grad_norm_(memory.parameters(), max_norm=10.0)
 
-            # Log gradient statistics
-            print("Gradient statistics:")
-            for name, param in memory.named_parameters():
-                if param.grad is not None:
-                    print(
-                        f"{name} gradient mean: {param.grad.mean().item():.5f}, std: {param.grad.std().item():.5f}"
-                    )
+            # # Log gradient statistics
+            # print("Gradient statistics:")
+            # for name, param in memory.named_parameters():
+            #     if param.grad is not None:
+            #         print(
+            #             f"{name} gradient mean: {param.grad.mean().item():.5f}, std: {param.grad.std().item():.5f}"
+            #         )
 
             # Update weights
             optimizer.step()
-            train_loss += batch_loss.item()
+            train_loss += loss.item()
 
         # Average train loss
         train_loss /= len(train_dataloader)
@@ -266,12 +248,12 @@ class MemoryTrainer:
                 train_dataloader,
                 optimizer,
             )
-            test_loss = self._test_step(
-                memory,
-                vision,
-                test_dataloader,
-            )
-            print(f"Epoch {epoch} | {train_loss=} | {test_loss=}")
+            # test_loss = self._test_step(
+            #     memory,
+            #     vision,
+            #     test_dataloader,
+            # )
+            print(f"Epoch {epoch} | {train_loss=} ")
         os.makedirs(save_path.parents[0], exist_ok=True)
         torch.save(memory.state_dict(), save_path)
 
@@ -282,7 +264,7 @@ if __name__ == "__main__":
     if file_path.exists():
         dataset = RolloutDataset.load(file_path=file_path)
     else:
-        dataset = RolloutDataset(num_rollouts=1000, max_steps=200)
+        dataset = RolloutDataset(num_rollouts=20, max_steps=10)
         dataset.save(file_path=file_path)
 
     train_rollouts, test_rollouts, eval_rollouts = torch.utils.data.random_split(
@@ -292,21 +274,21 @@ if __name__ == "__main__":
     test_set = RolloutDataset(rollouts=test_rollouts.dataset.rollouts)  # type: ignore
     eval_set = RolloutDataset(rollouts=eval_rollouts.dataset.rollouts)  # type: ignore
 
-    train_dataloader = RolloutDataloader(training_set, batch_size=64)
-    test_dataloader = RolloutDataloader(test_set, batch_size=64)
+    train_dataloader = RolloutDataloader(training_set, batch_size=2)
+    test_dataloader = RolloutDataloader(test_set, batch_size=2)
 
     vision = ConvVAE().from_pretrained().to(DEVICE)
     memory = MDN_RNN().to(DEVICE)
-    memory_trainer = MemoryTrainer()
-    memory_trainer.train(
-        memory,
-        vision,
-        train_dataloader,
-        test_dataloader,
-        torch.optim.Adam(memory.parameters()),
-        epochs=5,
-    )
-    exit()
+    # memory_trainer = MemoryTrainer()
+    # memory_trainer.train(
+    #     memory,
+    #     vision,
+    #     train_dataloader,
+    #     test_dataloader,
+    #     torch.optim.Adam(memory.parameters()),
+    #     epochs=50,
+    # )
+    # exit()
     memory = MDN_RNN().from_pretrained().to(DEVICE)
     vision.eval()
     memory.eval()
@@ -359,7 +341,6 @@ if __name__ == "__main__":
             mdn_reconstruction[0]
         )  # Keep the first sample in the batch
 
-    # Convert lists to tensors for plotting
     vae_reconstructions = torch.stack(
         vae_reconstructions
     ).numpy()  # Shape: (timesteps, C, H, W)
@@ -367,29 +348,42 @@ if __name__ == "__main__":
         mdn_reconstructions
     ).numpy()  # Shape: (timesteps, C, H, W)
 
-    # Plot the results
-    for t in range(timesteps):
-        fig, axes = plt.subplots(1, 3, figsize=(12, 4))
+    # Create a list to store images for the GIF
+    frames = []
 
+    for t in range(timesteps):
         # Original Observation
-        original = (
-            observations[0, t].permute(1, 2, 0).cpu().numpy()
-        )  # First batch sample, permute to [H, W, C]
-        axes[0].imshow(original)
-        axes[0].set_title("Original Observation")
-        axes[0].axis("off")
+        original = (observations[0, t].permute(1, 2, 0).cpu().numpy() * 255).astype(
+            "uint8"
+        )  # Normalize to [0, 255]
 
         # VAE Reconstruction
-        vae_image = vae_reconstructions[t].transpose(1, 2, 0)  # Convert to HWC
-        axes[1].imshow(vae_image)
-        axes[1].set_title("VAE Reconstruction")
-        axes[1].axis("off")
+        vae_image = (vae_reconstructions[t].transpose(1, 2, 0) * 255).astype(
+            "uint8"
+        )  # Convert to HWC and normalize
 
         # MDN Reconstruction
-        mdn_image = mdn_reconstructions[t].transpose(1, 2, 0)  # Convert to HWC
-        axes[2].imshow(mdn_image)
-        axes[2].set_title("MDN Reconstruction")
-        axes[2].axis("off")
+        mdn_image = (mdn_reconstructions[t].transpose(1, 2, 0) * 255).astype(
+            "uint8"
+        )  # Convert to HWC and normalize
 
-        plt.tight_layout()
-        plt.show()
+        # Create a single canvas for all three images
+        h, w, c = original.shape
+        canvas = Image.new("RGB", (w * 3, h))  # Width: 3 images side by side
+        canvas.paste(Image.fromarray(original), (0, 0))
+        canvas.paste(Image.fromarray(vae_image), (w, 0))
+        canvas.paste(Image.fromarray(mdn_image), (w * 2, 0))
+
+        # Add to frames
+        frames.append(canvas)
+
+    # Save frames as a GIF
+    frames[0].save(
+        "reconstructions.gif",
+        save_all=True,
+        append_images=frames[1:],
+        duration=200,  # Duration between frames in milliseconds
+        loop=0,  # Infinite loop
+    )
+
+    print("GIF saved as reconstructions.gif")

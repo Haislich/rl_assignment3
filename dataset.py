@@ -8,6 +8,7 @@ from pathlib import Path
 import os
 from concurrent.futures import ProcessPoolExecutor
 from functools import partial
+import numpy as np
 
 
 @dataclass
@@ -45,7 +46,9 @@ class RolloutDataset(Dataset):
         observations, actions, rewards = [], [], []
         observation, _ = self.env.reset()
         for _ in range(self.max_steps):
-            action = self.env.action_space.sample()
+            action = np.where(
+                np.random.uniform(0, 1) < 0.9, 3, self.env.action_space.sample()
+            ).item()
             next_obs, reward, done, _, _ = self.env.step(action)
             observation = self.__transformation(Image.fromarray(observation))
             observations.append(observation)

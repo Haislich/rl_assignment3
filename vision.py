@@ -77,7 +77,6 @@ class ConvVAE(nn.Module):
 
     def get_latents(self, observations: torch.Tensor) -> torch.Tensor:
         latents = []
-        print(f"{observations.shape=}")
         for observation in observations:
             mu, log_sigma = self.encoder(observation)
             sigma = log_sigma.exp()
@@ -249,7 +248,7 @@ if __name__ == "__main__":
     if file_path.exists():
         dataset = RolloutDataset.load(file_path=file_path)
     else:
-        dataset = RolloutDataset(num_rollouts=10, max_steps=10)
+        dataset = RolloutDataset(num_rollouts=30, max_steps=400)
         dataset.save(file_path=file_path)
 
     train_rollouts, test_rollouts, eval_rollouts = torch.utils.data.random_split(
@@ -262,8 +261,8 @@ if __name__ == "__main__":
     test_set = RolloutDataset(rollouts=test_rollouts.dataset.rollouts)  # type: ignore
     eval_set = RolloutDataset(rollouts=eval_rollouts.dataset.rollouts)  # type: ignore
 
-    train_dataloader = RolloutDataloader(training_set, 64)
-    test_dataloader = RolloutDataloader(test_set, 64)
+    train_dataloader = RolloutDataloader(training_set, 2)
+    test_dataloader = RolloutDataloader(test_set, 2)
 
     vision = ConvVAE().to(DEVICE)
 
@@ -274,4 +273,5 @@ if __name__ == "__main__":
         train_dataloader,
         test_dataloader,
         torch.optim.Adam(vision.parameters()),
+        epochs=20,
     )
