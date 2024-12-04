@@ -85,9 +85,11 @@ class RolloutDataset(Dataset):
     Args:
         num_rollouts (int): Number of episodes to collect if none are provided. Default is 10,000.
         max_steps (int): Maximum number of steps per episode. Default is 100.
-        continuous (bool): Whether the environment uses continuous action space. Default is False.
+        reward_threshold (float): Minimum average reward to keep an episode. Default is -0.1.
+        continuos (bool): Whether the environment uses continuous action space. Default is False.
         env_name (str): Name of the Gym environment. Default is "CarRacing-v2".
         episodes (Optional[List[Episode]]): Pre-collected episodes to initialize the dataset.
+        file_path (Optional[Path]): Path to load the dataset from.
     """
 
     def __init__(
@@ -98,12 +100,12 @@ class RolloutDataset(Dataset):
         continuos: bool = False,
         env_name: str = "CarRacing-v2",
         episodes: Optional[List["Episode"]] = None,
+        file_path: Optional[Path] = None,
     ):
         self.num_rollouts = num_rollouts
         self.env_name = env_name
         self.continuos = continuos
         self.reward_threshold = reward_threshold
-        self.seeds = np.random.randint(0, 10000, size=num_rollouts)
         self.__transformation = transforms.Compose(
             [
                 transforms.ToPILImage(),
@@ -111,12 +113,51 @@ class RolloutDataset(Dataset):
                 transforms.ToTensor(),
             ]
         )
-        if episodes is not None:
+
+        if file_path:
+            self.episodes = self._load_from_directory(file_path)
+            self.max_steps = self.get_mean_length()
+        elif episodes is not None:
             self.episodes = episodes
             self.max_steps = self.get_mean_length()
         else:
             self.max_steps = max_steps
             self.episodes = self._collect_and_filter_rollouts(num_rollouts)
+
+    def _load_from_directory(self, file_path: Path) -> List["Episode"]:
+        """
+        Loads a dataset from a directory with observations as images.
+
+        Args:
+            file_path (Path): Path to the dataset directory.
+
+        Returns:
+            List[Episode]: List of episodes loaded from the directory.
+        """
+        file_path = file_path.with_suffix("")  # Remove extension if provided
+
+        if not file_path.exists() or not file_path.is_dir():
+            raise FileNotFoundError(f"The directory {file_path} does not exist.")
+
+        episodes = []
+        for episode_dir in sorted(file_path.glob("episode_*")):
+            observations = []
+            for img_path in sorted(episode_dir.glob("obs_*.png")):
+                img = Image.open(img_path)
+                observation = transforms.ToTensor()(img)
+                observations.append(observation)
+
+            metadata = torch.load(episode_dir / "metadata.pt")
+            episodes.append(
+                Episode(
+                    observations=torch.stack(observations),
+                    actions=metadata["actions"],
+                    rewards=metadata["rewards"],
+                )
+            )
+
+        print(f"Loaded {len(episodes)} episodes from {file_path}")
+        return episodes
 
     def _collect_single_rollout(self, index: int = 0) -> "Episode":
         """
@@ -248,48 +289,33 @@ class RolloutDataset(Dataset):
 
     def save(self, file_path: Path):
         """
-        Saves the dataset to a file.
+        Saves the dataset to a directory with observations as images.
 
         Args:
             file_path (Path): Path to save the dataset file.
         """
-        file_path.parent.mkdir(parents=True, exist_ok=True)
-        data_to_save = {
-            "episodes": [
+        file_path = file_path.with_suffix("")  # Remove extension if provided
+        file_path.mkdir(parents=True, exist_ok=True)
+
+        for i, episode in enumerate(self.episodes):
+            episode_dir = file_path / f"episode_{i}"
+            episode_dir.mkdir(parents=True, exist_ok=True)
+
+            # Save observations as images
+            for j, observation in enumerate(episode.observations):
+                img = transforms.ToPILImage()(observation)
+                img.save(episode_dir / f"obs_{j}.png")
+
+            # Save actions and rewards in a single file
+            torch.save(
                 {
-                    "observations": episode.observations,
                     "actions": episode.actions,
                     "rewards": episode.rewards,
-                }
-                for episode in self.episodes
-            ],
-        }
-        torch.save(data_to_save, file_path)
-        print(f"Dataset saved to {file_path}")
-
-    @classmethod
-    def load(cls, file_path: Path) -> "RolloutDataset":
-        """
-        Loads a dataset from a file.
-
-        Args:
-            file_path (Path): Path to the dataset file.
-
-        Returns:
-            RolloutDataset: An instance of the dataset loaded with episodes.
-        """
-        if not file_path.exists():
-            raise FileNotFoundError(f"The file {file_path} does not exist.")
-        loaded_data = torch.load(file_path, weights_only=False)
-        episodes = [
-            Episode(
-                observations=data["observations"],
-                actions=data["actions"],
-                rewards=data["rewards"],
+                },
+                episode_dir / "metadata.pt",
             )
-            for data in loaded_data["episodes"]
-        ]
-        return cls(num_rollouts=0, max_steps=0, episodes=episodes)
+
+        print(f"Dataset saved to {file_path}")
 
     def __len__(self) -> int:
         """Returns the number of episodes in the dataset."""
@@ -385,18 +411,14 @@ class RolloutDataloader(DataLoader):
         yield from super().__iter__()
 
 
-# if __name__ == "__main__":
-#     file_path = Path("data") / "dataset.pt"
+if __name__ == "__main__":
+    file_path = Path("data") / "dataset.pt"
 
-#     if False and file_path.exists():
-#         dataset = RolloutDataset.load(file_path=file_path)
-#     else:
-#         dataset = RolloutDataset(num_rollouts=10, max_steps=1000, reward_threshold=-0.1)
-
-#         dataset.save(file_path=file_path)
-#     # Select an episode
-#     # selected_episode = dataset[0]
-#     for i in range(5):
-#         # Save GIF
-#         save_path = Path("episodes") / f"episode_{i}.gif"
-#         dataset.create_gif(dataset[i], save_path)
+    dataset = RolloutDataset(num_rollouts=10, max_steps=10, reward_threshold=-0.1)
+    dataset.save(file_path=file_path)
+    # Select an episode
+    # selected_episode = dataset[0]
+    # for i in range(5):
+    #     # Save GIF
+    #     save_path = Path("episodes") / f"episode_{i}.gif"
+    #     create_gif(dataset[i], save_path)
