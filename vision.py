@@ -96,8 +96,6 @@ class Encoder(nn.Module):
         x = F.relu(self.relu_conv2(x))
         x = F.relu(self.relu_conv3(x))
         x = F.relu(self.relu_conv4(x))
-
-        # Flatten the tensor for the fully connected layers
         x = x.view(x.size(0), -1)
 
         mu = self.fc_mu(x)
@@ -201,7 +199,7 @@ class ConvVAE(nn.Module):
         """
         mu, log_sigma = self.encoder(observation)  # Add batch dimension
         sigma = log_sigma.exp()
-        return (mu + sigma * torch.randn_like(sigma)).squeeze(0)
+        return mu + sigma * torch.randn_like(sigma)
 
     def get_latents(self, observations: torch.Tensor) -> torch.Tensor:
         """
@@ -215,7 +213,6 @@ class ConvVAE(nn.Module):
             torch.Tensor: Latent vectors of shape (batch_size,ep_len, latent_dimension).
         """
         batch_size, ep_len, *observation_shape = observations.shape
-
         observations = observations.view(batch_size * ep_len, *observation_shape)
         mu, log_sigma = self.encoder(observations)
         sigma = torch.exp(log_sigma)
@@ -242,22 +239,14 @@ class ConvVAE(nn.Module):
         Returns:
             torch.Tensor: Combined reconstruction and KL-divergence loss.
         """
-        # print("In the loss:")
-        # print(f"{reconstruction.shape=}")
-        # print(f"{original.shape=}")
-
         # Reconstruction loss (MSE or BCE)
         reconstruction_loss = F.mse_loss(
             input=reconstruction, target=original, reduction="sum"
         )
-        # print(f"{reconstruction_loss=}")
         # KL-divergence loss
         kl_divergence = -0.5 * torch.sum(
             1 + 2 * log_sigma - mu.pow(2) - (2 * log_sigma).exp()
         )
-        # print(f"{kl_divergence=}")
-        # print()
-        # exit()
         return reconstruction_loss + kl_divergence
 
     @staticmethod

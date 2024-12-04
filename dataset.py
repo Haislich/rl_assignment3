@@ -11,8 +11,46 @@ import torch
 from torch.utils.data import DataLoader, Dataset
 from torchvision import transforms
 from tqdm import tqdm
-import imageio
 from pathlib import Path
+from PIL import Image
+import torchvision.transforms as T
+
+
+def create_gif_dataset(
+    episode,
+    save_path=Path("episode.gif"),
+):
+    observations = episode.observations
+
+    # Decode latent vectors to reconstruct images
+    scale_factor = 1  # Scale images for better resolution
+    spacing = 1  # Padding between images
+    img_width, img_height = 64 * scale_factor, 64 * scale_factor
+    total_width = img_width + spacing * 2  # 3 images side-by-side
+    total_height = img_height
+
+    images = []
+    for t in range(observations.shape[0]):  # Up to the length of MDN outputs
+        # Original observation
+        original_img = T.Resize((img_height, img_width))(
+            T.ToPILImage()(observations[0, t].cpu())
+        )
+
+        # Combine images with padding
+        combined_img = Image.new("RGB", (total_width, total_height), (0, 0, 0))
+        combined_img.paste(original_img, (0, 0))
+        images.append(combined_img)
+
+    save_path.parent.mkdir(parents=True, exist_ok=True)
+    # Save as GIF
+    images[0].save(
+        save_path,
+        save_all=True,
+        append_images=images[1:],
+        duration=20,  # Increase duration for slower playback
+        loop=0,
+    )
+    print(f"Dataset reconstruction GIF saved to {save_path}")
 
 
 @dataclass
@@ -268,31 +306,6 @@ class RolloutDataset(Dataset):
             Episode: The episode at the specified index.
         """
         return self.episodes[idx]
-
-    def create_gif(self, episode: Episode, save_path: Path):
-        """
-        Creates a GIF for a specific episode's observations.
-
-        Args:
-            episode (Episode): The episode to visualize.
-            save_path (Path): Path to save the GIF file.
-        """
-        # Ensure save directory exists
-        save_path.parent.mkdir(parents=True, exist_ok=True)
-
-        # Convert tensor observations to images
-        frames = []
-        for frame_tensor in episode.observations:
-            # Convert tensor to NumPy array for imageio
-            frame = (
-                frame_tensor.permute(1, 2, 0).numpy() * 255
-            )  # (C, H, W) -> (H, W, C)
-            frame = frame.astype(np.uint8)
-            frames.append(frame)
-
-        # Save the frames as a GIF
-        imageio.mimsave(save_path, frames, fps=10)
-        print(f"GIF saved to {save_path}")
 
 
 class RolloutDataloader(DataLoader):

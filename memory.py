@@ -9,7 +9,7 @@ from dataset import RolloutDataloader, RolloutDataset
 from vision import ConvVAE
 import matplotlib.pyplot as plt
 import torchvision.transforms as T
-from PIL import Image, ImageDraw
+from PIL import Image
 import random
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
