@@ -1,20 +1,12 @@
 """This module contains the definition for the dataset."""
 
-from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass
-from functools import partial
 from pathlib import Path
-from typing import Any, Callable, Iterable, Iterator, List, Literal, Optional, Tuple
+from typing import Any, Callable, Iterable, Iterator, List, Literal, Tuple
 
-import gymnasium as gym
-import numpy as np
 import torch
-import torchvision.transforms as T
-from PIL import Image
 from torch.utils.data import DataLoader, Dataset
 from torch.utils.data.sampler import Sampler
-from torchvision import transforms
-from tqdm import tqdm
 
 from dataset import Episode, RolloutDataset
 from vision import ConvVAE
@@ -110,8 +102,12 @@ class LatentDataset(Dataset):
         ]
         return latent_episode_paths
 
-    def __getitem__(self, index) -> Any:
-        return self.latent_episodes_paths[index]
+    def __len__(self):
+        return len(self.latent_episodes_paths)
+
+    def __getitem__(self, index):
+        latent_episode_path = self.latent_episodes_paths[index]
+        return LatentEpisode.load(latent_episode_path)
 
     def __iter__(self):
         return iter(self.latent_episodes_paths)
@@ -160,7 +156,7 @@ class LatentDataloader(DataLoader):
     @staticmethod
     def __collate_fn(batch) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         batch_latent_observations = torch.stack(
-            [latent_episode.observations for latent_episode in batch]
+            [latent_episode.latent_observations for latent_episode in batch]
         )
         batch_actions = torch.stack(
             [latent_episode.actions for latent_episode in batch]

@@ -118,17 +118,17 @@ class RolloutDataset(Dataset):
             ]
         )
         if mode == "load":
-            self.episodes = self._load_dataset()
-            if self.episodes == []:
+            self.episodes_paths = self._load_dataset()
+            if self.episodes_paths == []:
                 print(f"Dataset not found at {self.root}. Falling back to creation.")
                 self.episodes = self._create_dataset()
         elif mode == "create":
-            self.episodes = self._create_dataset()
+            self.episodes_paths = self._create_dataset()
             print(f"Created dataset with {len(self.episodes)} episodes.")
         elif mode == "from":
             if episodes is None:
                 raise ValueError("'episodes' must be provided when mode is 'from'")
-            self.episodes = episodes
+            self.episodes_paths = episodes
         else:
             raise ValueError(
                 f"Invalid mode '{mode}'. Supported modes: 'create', 'load', 'from'."
@@ -224,10 +224,10 @@ class RolloutDataset(Dataset):
         return Episode.load(episode_path)
 
     def __len__(self):
-        return len(self.episodes)
+        return len(self.episodes_paths)
 
     def __iter__(self):
-        return iter(self.episodes)
+        return iter(self.episodes_paths)
 
 
 class RolloutDataloader(DataLoader):

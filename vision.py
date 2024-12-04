@@ -2,11 +2,10 @@
 
 from pathlib import Path
 from typing import Optional
-import matplotlib.pyplot as plt
 import torch
 import torch.nn.functional as F
 from torch import nn
-from dataset import RolloutDataloader, RolloutDataset, Episode
+from dataset import RolloutDataloader, Episode
 import torchvision.transforms as T
 from PIL import Image
 
@@ -130,11 +129,11 @@ class VisionTrainer:
         vision.train()
         train_loss = 0
 
-        for batch_episode_observations, _, _ in train_dataloader:
-            batch_episode_observations = batch_episode_observations.to(
+        for batch_episodes_observations, _, _ in train_dataloader:
+            batch_episodes_observations = batch_episodes_observations.to(
                 next(vision.parameters()).device
             ).permute(1, 0, 2, 3, 4)
-            for batch_observations in batch_episode_observations:
+            for batch_observations in batch_episodes_observations:
                 reconstruction, mu, log_sigma = vision(batch_observations)
                 loss = vision.loss(reconstruction, batch_observations, mu, log_sigma)
                 optimizer.zero_grad()
@@ -142,7 +141,7 @@ class VisionTrainer:
                 optimizer.step()
                 train_loss += loss.item()
                 train_loss /= batch_observations.shape[0]
-            train_loss /= batch_episode_observations.shape[0]
+            train_loss /= batch_episodes_observations.shape[0]
         train_loss /= len(train_dataloader)
         return train_loss
 
@@ -154,16 +153,16 @@ class VisionTrainer:
         vision.eval()
         test_loss = 0
 
-        for batch_episode_observations, _, _ in test_dataloader:
-            batch_episode_observations = batch_episode_observations.to(
+        for batch_episodes_observations, _, _ in test_dataloader:
+            batch_episodes_observations = batch_episodes_observations.to(
                 next(vision.parameters()).device
             ).permute(1, 0, 2, 3, 4)
-            for batch_observations in batch_episode_observations:
+            for batch_observations in batch_episodes_observations:
                 reconstruction, mu, log_sigma = vision(batch_observations)
                 loss = vision.loss(reconstruction, batch_observations, mu, log_sigma)
                 test_loss += loss.item()
                 test_loss /= batch_observations.shape[0]
-            test_loss /= batch_episode_observations.shape[0]
+            test_loss /= batch_episodes_observations.shape[0]
         test_loss /= len(test_dataloader)
         return test_loss
 
@@ -175,7 +174,7 @@ class VisionTrainer:
         optimizer: torch.optim.Optimizer,
         val_dataloader: Optional[RolloutDataloader] = None,
         epochs: int = 10,
-        save_path=Path("models") / "vision.pt",
+        save_path=Path("models/vision.pt"),
     ):
         vision.to(next(vision.parameters()).device)
 
