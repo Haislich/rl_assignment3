@@ -8,72 +8,26 @@ from latent_dataset import LatentDataloader
 import torchvision.transforms as T
 from PIL import Image
 
+
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-
-
-# Create GIF for visual inspection
-def create_gif(
-    episode,
-    vision,
-    memory,
-    save_path=Path("memory_reconstruction.gif"),
-):
-    observations = episode.observations.unsqueeze(0).to(DEVICE)
-    actions = episode.actions.unsqueeze(0).to(DEVICE)
-    latents = vision.get_latents(observations=observations)
-    pi, mu, sigma, _ = memory(latents[:, :-1, :], actions[:, :-1])
-    predicted_latents = memory.sample_latent(
-        pi.squeeze(0), mu.squeeze(0), sigma.squeeze(0)
-    )
-    vae_reconstructions = vision.decoder(latents.squeeze(0))
-    mdn_reconstructions = vision.decoder(predicted_latents)
-    scale_factor = 1
-    spacing = 1
-    img_width, img_height = 64 * scale_factor, 64 * scale_factor
-    total_width = img_width * 3 + spacing * 2
-    total_height = img_height
-
-    images = []
-    for t in range(mdn_reconstructions.shape[0]):
-        # Original observation
-        original_img = T.Resize((img_height, img_width))(
-            T.ToPILImage()(observations[0, t].cpu())
-        )
-
-        vae_img = T.Resize((img_height, img_width))(
-            T.ToPILImage()(vae_reconstructions[t].cpu())
-        )
-
-        mdn_img = T.Resize((img_height, img_width))(
-            T.ToPILImage()(mdn_reconstructions[t].cpu())
-        )
-        combined_img = Image.new("RGB", (total_width, total_height), (0, 0, 0))
-        combined_img.paste(original_img, (0, 0))
-        combined_img.paste(vae_img, (img_width + spacing, 0))
-        combined_img.paste(mdn_img, (2 * (img_width + spacing), 0))
-
-        images.append(combined_img)
-    save_path.parent.mkdir(parents=True, exist_ok=True)
-    # Save as GIF
-    images[0].save(
-        save_path,
-        save_all=True,
-        append_images=images[1:],
-        duration=200,  # Increase duration for slower playback
-        loop=0,
-    )
-    print(f"Reconstruction GIF saved to {save_path}")
 
 
 class MDN_RNN(nn.Module):
     def __init__(
-        self, latent_dimension: int = 32, hidden_units: int = 256, num_mixtures: int = 5
+        self,
+        latent_dimension: int = 32,
+        hidden_units: int = 256,
+        num_mixtures: int = 5,
+        continuos=False,
     ):
         super().__init__()
         self.hidden_dim = hidden_units
         self.num_mixtures = num_mixtures
         self.latent_dimension = latent_dimension
-        self.rnn = nn.LSTM(latent_dimension + 1, hidden_units, batch_first=True)
+        self.continuos = continuos
+        self.rnn = nn.LSTM(
+            latent_dimension + (3 if continuos else 1), hidden_units, batch_first=True
+        )
         self.fc_pi = nn.Linear(hidden_units, num_mixtures)
         self.fc_mu = nn.Linear(hidden_units, num_mixtures * latent_dimension)
         self.fc_log_sigma = nn.Linear(hidden_units, num_mixtures * latent_dimension)
@@ -86,7 +40,8 @@ class MDN_RNN(nn.Module):
     ) -> Tuple[
         torch.Tensor, torch.Tensor, torch.Tensor, Tuple[torch.Tensor, torch.Tensor]
     ]:
-        actions = actions.unsqueeze(-1)
+        if not self.continuos:
+            actions = actions.unsqueeze(-1)
         rnn_out, hidden = self.rnn(
             torch.cat([latents, actions], dim=-1),
             hidden,
@@ -148,11 +103,13 @@ class MDN_RNN(nn.Module):
         return normal.rsample()
 
     @staticmethod
-    def from_pretrained(model_path: Path = Path("models/memory.pt")) -> "MDN_RNN":
+    def from_pretrained(
+        model_path: Path = Path("models/memory_discrete.pt"),
+    ) -> "MDN_RNN":
         if not model_path.exists():
             raise FileNotFoundError(f"Couldn't find the Mdn-RNN model at {model_path}")
         loaded_data = torch.load(model_path, weights_only=True)
-        mdn_rnn = MDN_RNN()
+        mdn_rnn = MDN_RNN(continuos="continuos" in model_path.name)
         mdn_rnn.load_state_dict(loaded_data)
         return mdn_rnn
 
@@ -228,7 +185,21 @@ class MemoryTrainer:
         epochs: int = 10,
         save_path: Path = Path("models/memory.pt"),
     ):
-
+        # if memory.continuos and not train_dataloader.dataset.continuos:  # type: ignore
+        #     raise ValueError(
+        #         f"Cannot train a {'continuos' if memory.continuos else 'discrete'} {type(memory)}"
+        #         + f"using a {'continuos' if train_dataloader.dataset.continuos else 'discrete'} {type(train_dataloader.dataset)}"  # type: ignore
+        #     )
+        # if memory.continuos and not test_dataloader.dataset.continuos:  # type: ignore
+        #     raise ValueError(
+        #         f"Cannot train a {'continuos' if memory.continuos else 'discrete'} {type(memory)}"
+        #         + f"using a {'continuos' if test_dataloader.dataset.continuos else 'discrete'} {type(test_dataloader.dataset)}"  # type: ignore
+        #     )
+        # if memory.continuos and not val_dataloader.dataset.continuos:  # type: ignore
+        #     raise ValueError(
+        #         f"Cannot train a {'continuos' if memory.continuos else 'discrete'} {type(memory)}"
+        #         + f"using a {'continuos' if val_dataloader.dataset.continuos else 'discrete'} {type(val_dataloader.dataset)}"  # type: ignore
+        #     )
         # scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=10, gamma=0.5)
 
         for epoch in range(epochs):
@@ -247,57 +218,72 @@ class MemoryTrainer:
             print(f"Validation Loss: {val_loss:.4f}")
         # Save the model
         save_path.parent.mkdir(parents=True, exist_ok=True)
+
         torch.save(memory.state_dict(), save_path)
         print(f"Model saved to {save_path}")
 
 
-# if __name__ == "__main__":
-#     rollout_dataset = RolloutDataset()
+if __name__ == "__main__":
+    from dataset import RolloutDataset
+    from latent_dataset import LatentDataset, LatentDataloader
+    from vision import ConvVAE
 
-#     vision = ConvVAE.from_pretrained().to(DEVICE)
+    CONTINUOS = True
+    rollout_dataset = RolloutDataset(
+        "create",
+        num_rollouts=10,
+        max_steps=10,
+        continuos=CONTINUOS,
+    )
 
-#     train_episodes, test_episodes, val_episodes = torch.utils.data.random_split(
-#         rollout_dataset, [0.5, 0.3, 0.2]
-#     )
-#     training_set = LatentDataset(
-#         RolloutDataset(
-#             "from",
-#             episodes=[
-#                 rollout_dataset.episodes_paths[idx] for idx in train_episodes.indices
-#             ],
-#         ),
-#         vision,
-#         "load",
-#     )
-#     test_set = LatentDataset(
-#         RolloutDataset(
-#             "from",
-#             episodes=[
-#                 rollout_dataset.episodes_paths[idx] for idx in test_episodes.indices
-#             ],
-#         ),
-#         vision,
-#         "load",
-#     )
-#     val_set = LatentDataset(
-#         RolloutDataset(
-#             "from",
-#             episodes=[
-#                 rollout_dataset.episodes_paths[idx] for idx in val_episodes.indices
-#             ],
-#         ),
-#         vision,
-#         "load",
-#     )
+    vision = ConvVAE.from_pretrained().to(DEVICE)
 
-#     train_dataloader = LatentDataloader(training_set, 64)
-#     test_dataloader = LatentDataloader(test_set, 64)
-#     test_dataloader = LatentDataloader(val_set, 64)
-#     memory = MDN_RNN()
-#     memory_trainer = MemoryTrainer()
-#     memory_trainer.train(
-#         memory,
-#         train_dataloader,
-#         test_dataloader,
-#         torch.optim.Adam(memory.parameters()),
-#     )
+    train_episodes, test_episodes, val_episodes = torch.utils.data.random_split(
+        rollout_dataset, [0.5, 0.3, 0.2]
+    )
+    training_set = LatentDataset(
+        RolloutDataset(
+            "from",
+            episodes=[
+                rollout_dataset.episodes_paths[idx] for idx in train_episodes.indices
+            ],
+            continuos=CONTINUOS,
+        ),
+        vision,
+        "create",
+    )
+    test_set = LatentDataset(
+        RolloutDataset(
+            "from",
+            episodes=[
+                rollout_dataset.episodes_paths[idx] for idx in test_episodes.indices
+            ],
+            continuos=CONTINUOS,
+        ),
+        vision,
+        "create",
+    )
+    val_set = LatentDataset(
+        RolloutDataset(
+            "from",
+            episodes=[
+                rollout_dataset.episodes_paths[idx] for idx in val_episodes.indices
+            ],
+            continuos=CONTINUOS,
+        ),
+        vision,
+        "create",
+    )
+
+    train_dataloader = LatentDataloader(training_set, 64)
+    test_dataloader = LatentDataloader(test_set, 64)
+    test_dataloader = LatentDataloader(val_set, 64)
+    memory = MDN_RNN(continuos=CONTINUOS)
+    memory_trainer = MemoryTrainer()
+    memory_trainer.train(
+        memory,
+        train_dataloader,
+        test_dataloader,
+        torch.optim.Adam(memory.parameters()),
+        save_path=Path("models/memory_continuos.pt"),
+    )

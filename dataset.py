@@ -9,48 +9,10 @@ from typing import Any, Callable, Iterable, Iterator, List, Literal, Optional, T
 import gymnasium as gym
 import numpy as np
 import torch
-from PIL import Image
 from torch.utils.data import DataLoader, Dataset
 from torch.utils.data.sampler import Sampler
 from torchvision import transforms
 from tqdm import tqdm
-
-
-def create_gif_dataset(
-    episode,
-    save_path=Path("episode.gif"),
-):
-    observations = episode.observations
-
-    # Decode latent vectors to reconstruct images
-    scale_factor = 1  # Scale images for better resolution
-    spacing = 1  # Padding between images
-    img_width, img_height = 64 * scale_factor, 64 * scale_factor
-    total_width = img_width + spacing * 2  # 3 images side-by-side
-    total_height = img_height
-
-    images = []
-    for t in range(observations.shape[0]):  # Up to the length of MDN outputs
-        # Original observation
-        original_img = transforms.Resize((img_height, img_width))(
-            transforms.ToPILImage()(observations[0, t].cpu())
-        )
-
-        # Combine images with padding
-        combined_img = Image.new("RGB", (total_width, total_height), (0, 0, 0))
-        combined_img.paste(original_img, (0, 0))
-        images.append(combined_img)
-
-    save_path.parent.mkdir(parents=True, exist_ok=True)
-    # Save as GIF
-    images[0].save(
-        save_path,
-        save_all=True,
-        append_images=images[1:],
-        duration=20,  # Increase duration for slower playback
-        loop=0,
-    )
-    print(f"Dataset reconstruction GIF saved to {save_path}")
 
 
 @dataclass
@@ -98,8 +60,8 @@ class RolloutDataset(Dataset):
             "load",
             "from",
         ] = "load",  # Modes: "create", "load", or "from"
-        num_rollouts: int = 10,
-        max_steps: int = 10,
+        num_rollouts: int = 1,
+        max_steps: int = 1,
         continuos: bool = False,
         env_name: str = "CarRacing-v2",
         episodes: Optional[List[Path]] = None,
@@ -121,10 +83,10 @@ class RolloutDataset(Dataset):
             self.episodes_paths = self._load_dataset()
             if self.episodes_paths == []:
                 print(f"Dataset not found at {self.root}. Falling back to creation.")
-                self.episodes = self._create_dataset()
+                self.episodes_paths = self._create_dataset()
         elif mode == "create":
             self.episodes_paths = self._create_dataset()
-            print(f"Created dataset with {len(self.episodes)} episodes.")
+            print(f"Created dataset with {len(self.episodes_paths)} episodes.")
         elif mode == "from":
             if episodes is None:
                 raise ValueError("'episodes' must be provided when mode is 'from'")
@@ -133,6 +95,8 @@ class RolloutDataset(Dataset):
             raise ValueError(
                 f"Invalid mode '{mode}'. Supported modes: 'create', 'load', 'from'."
             )
+        if self.episodes_paths == []:
+            raise ValueError("Cannot create a RolloutDataset without episodes.")
 
     def _create_dataset(self):
         episodes = self._collect_and_filter_episodes(self.num_rollouts, self.max_steps)
@@ -146,6 +110,42 @@ class RolloutDataset(Dataset):
         ]
         return episode_paths
 
+    def _sampling_strategy(self, recent_acceleration: bool):
+        if self.continuos:
+            # Dict continuos actions
+            # {
+            #     "dtype": dtype("float32"),
+            #     "bounded_below": array([True, True, True]),
+            #     "bounded_above": array([True, True, True]),
+            #     "_shape": (3,),
+            #     "low": array([-1.0, 0.0, 0.0], dtype=float32),
+            #     "high": array([1.0, 1.0, 1.0], dtype=float32),
+            #     "low_repr": "[-1.  0.  0.]",
+            #     "high_repr": "1.0",
+            #     "_np_random": None,
+            # }
+            # [steering, acceleration, brake]
+            # Idealmente vogliamo che la acc abbia un bias verso l'essere 1
+            # mentre la dec abbia un bias verso l'essere 0
+            # https://homepage.divms.uiowa.edu/~mbognar/applets/normal.html
+            action = np.random.normal([0, 0.75, 0.25], [0.5, 0.1, 0.1])
+            action[0] = action[0].clip(-1, 1)
+            action[1] = action[1].clip(0, 1)
+            action[2] = action[2].clip(0, 1)
+        else:
+            if not recent_acceleration:
+                action = np.array(3)
+                recent_acceleration = True
+            else:
+                action = np.array(
+                    np.random.choice(
+                        [0, 1, 2, 3, 4],
+                        p=[0.1, 0.3, 0.3, 0.2, 0.1],
+                    )
+                )
+                recent_acceleration = action == 3
+        return action, recent_acceleration
+
     def _execute_single_rollout(self, max_steps: int, _index: int = 0) -> Episode:
         observations, actions, rewards = [], [], []
         env = gym.make(
@@ -157,27 +157,20 @@ class RolloutDataset(Dataset):
         observation, _ = env.reset()
         recent_acceleration = False
         for _ in range(max_steps):
-            if not recent_acceleration:
-                action = 3
-                recent_acceleration = True
-            else:
-                action = np.random.choice(
-                    [0, 1, 2, 3, 4],
-                    p=[0.1, 0.3, 0.3, 0.2, 0.1],
-                ).item()
-                recent_acceleration = action == 3
-
+            action, recent_acceleration = self._sampling_strategy(recent_acceleration)
             next_obs, reward, done, _, _ = env.step(action)
             observation = self.__transformation(observation)
             observations.append(observation)
+            action = torch.from_numpy(action)
             actions.append(action)
+            reward = torch.tensor(reward)
             rewards.append(reward)
             observation = next_obs
             if done:
                 break
         observations = torch.stack(observations)
-        actions = torch.tensor(actions, dtype=torch.float32)
-        rewards = torch.tensor(rewards, dtype=torch.float32)
+        actions = torch.stack(actions).to(dtype=torch.float32)
+        rewards = torch.stack(rewards).to(dtype=torch.float32)
         return Episode(observations=observations, actions=actions, rewards=rewards)
 
     def _collect_and_filter_episodes(
@@ -220,12 +213,13 @@ class RolloutDataset(Dataset):
         return filtered_episodes_path
 
     def __getitem__(self, index):
-        episode_path = self.episodes[index]
+        episode_path = self.episodes_paths[index]
         return Episode.load(episode_path)
 
     def __len__(self):
         return len(self.episodes_paths)
 
+    # TODO: Make it coherent w.r.t getitem
     def __iter__(self):
         return iter(self.episodes_paths)
 
@@ -287,9 +281,9 @@ class RolloutDataloader(DataLoader):
         yield from super().__iter__()
 
 
-# if __name__ == "__main__":
-#     file_path = Path("data") / "dataset.pt"
-#     dataset = RolloutDataset("load")
+if __name__ == "__main__":
+
+    dataset = RolloutDataset("create", continuos=False)
 
 #     train_episodes, test_episodes, eval_episodes = torch.utils.data.random_split(
 #         dataset, [0.5, 0.3, 0.2]

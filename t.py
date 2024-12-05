@@ -98,13 +98,30 @@
 #     del data
 
 
-from functools import partial
+# from functools import partial
 
 
-def f(a, b, c):
-    print(a)
-    print(b)
-    print(c)
+# def f(a, b, c):
+#     print(a)
+#     print(b)
+#     print(c)
 
 
-partial(partial(partial(f, 1), 2), 3)()
+# partial(partial(partial(f, 1), 2), 3)()
+
+# from pathlib import Path
+
+# p = Path("./models")
+
+# print(p.name)
+
+import numpy as np
+
+action = np.random.normal([0, 0.75, 0.25], [0.5, 0.25, 0.25])
+
+print(
+    action.clip(
+        -1,
+        1,
+    )
+)

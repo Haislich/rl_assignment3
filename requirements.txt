@@ -1,9 +1,11 @@
-numpy
+numpy==1.24.4
 scipy
 gymnasium==0.29.1
 gymnasium[box2d]
 scikit-learn
 torch
+
 torchvision
 matplotlib
 tqdm
+cmaes
