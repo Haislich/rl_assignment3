@@ -8,4 +8,4 @@ torch
 torchvision
 matplotlib
 tqdm
-cmaes
+cma

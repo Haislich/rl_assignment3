@@ -48,11 +48,6 @@ class Episode:
 
 
 class RolloutDataset(Dataset):
-    """
-    Dataset for reinforcement learning, supporting creation, loading from disk,
-    or initialization from a list of episodes.
-    """
-
     def __init__(
         self,
         mode: Literal[

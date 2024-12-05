@@ -20,7 +20,8 @@ class LatentEpisode:
 
     @staticmethod
     def from_episode(episode: Episode, vision: ConvVAE):
-        latent_observations = vision.get_latent(episode.observations)
+        device = next(vision.parameters()).device
+        latent_observations = vision.get_latent(episode.observations.to(device))
         return LatentEpisode(
             latent_observations=latent_observations,
             actions=episode.actions,

@@ -36,30 +36,28 @@ class MDN_RNN(nn.Module):
         self,
         latents: torch.Tensor,
         actions: torch.Tensor,
-        hidden: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
-    ) -> Tuple[
-        torch.Tensor, torch.Tensor, torch.Tensor, Tuple[torch.Tensor, torch.Tensor]
-    ]:
+        hidden_state: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         if not self.continuos:
             actions = actions.unsqueeze(-1)
-        rnn_out, hidden = self.rnn(
+        rnn_out, (hidden_state, _cell_state) = self.rnn(
             torch.cat([latents, actions], dim=-1),
-            hidden,
+            hidden_state,
         )
+        print(latents.shape)
+        print(actions.shape)
         pi = F.softmax(self.fc_pi(rnn_out), dim=-1)
         mu = self.fc_mu(rnn_out)
         log_sigma = self.fc_log_sigma(rnn_out)
         sigma = torch.exp(log_sigma)
-        return pi, mu, sigma, hidden  # type:ignore
+        return pi, mu, sigma, hidden_state  # type:ignore
 
     def __call__(
         self,
         latents: torch.Tensor,
         actions: torch.Tensor,
         hidden: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
-    ) -> Tuple[
-        torch.Tensor, torch.Tensor, torch.Tensor, Tuple[torch.Tensor, torch.Tensor]
-    ]:
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         return self.forward(latents, actions, hidden)
 
     def loss(
@@ -278,7 +276,7 @@ if __name__ == "__main__":
     train_dataloader = LatentDataloader(training_set, 64)
     test_dataloader = LatentDataloader(test_set, 64)
     test_dataloader = LatentDataloader(val_set, 64)
-    memory = MDN_RNN(continuos=CONTINUOS)
+    memory = MDN_RNN(continuos=CONTINUOS).to(DEVICE)
     memory_trainer = MemoryTrainer()
     memory_trainer.train(
         memory,
