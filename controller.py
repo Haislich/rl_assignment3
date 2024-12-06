@@ -11,6 +11,7 @@ from cma import CMAEvolutionStrategy
 from matplotlib.animation import FuncAnimation
 from torch import nn
 from torchvision import transforms
+from tqdm import tqdm
 
 from memory import MDN_RNN
 from vision import ConvVAE
@@ -79,16 +80,16 @@ class Controller(nn.Module):
 class ControllerTrainer:
     def __init__(
         self,
-        controller,
-        vision,
-        memory,
+        controller: Controller,
+        vision: ConvVAE,
+        memory: MDN_RNN,
         population_size=4,
         env_name="CarRacing-v2",
         render=False,
     ):
         self.controller = controller
-        self.vision = vision
-        self.memory = memory
+        self.vision = vision.eval()
+        self.memory = memory.eval()
         self.population_size = population_size
         self.env_name = env_name
         self.n_rows, self.n_cols = self._get_rows_and_cols()
@@ -132,8 +133,6 @@ class ControllerTrainer:
             cumulative_reward += float(reward)
             if done:
                 break
-            if cnt == 10 + index:
-                break
             _mu, _pi, _sigma, hidden_state, cell_state = self.memory.forward(
                 latent_observation,
                 action,
@@ -168,17 +167,32 @@ class ControllerTrainer:
 
     def train(
         self,
-        max_iterations=1,
-        save_path: Path = Path("models/controller_continuos.pt"),
+        max_epochs=1,
+        save_path: Path = Path("models"),
     ):
+        initial_epoch = 0
+        if save_path.exists():
+            checkpoints_path = sorted(
+                save_path.glob("controller_epoch_*"),
+                key=lambda p: int(p.stem.split("_")[-1]),
+            )
+            if len(checkpoints_path) > 0:
+                last_checkpoint_path = checkpoints_path[-1]
+                loaded_data = torch.load(last_checkpoint_path, weight_only=True)
+                self.controller.load_state_dict(loaded_data)
+                initial_epoch = int(last_checkpoint_path.stem.split("_")[-1])
+        save_path.parent.mkdir(parents=True, exist_ok=True)
         initial_solution = self.controller.get_weights()
         print(f"Initial solution size: {len(initial_solution)}")
         solver = CMAEvolutionStrategy(
             initial_solution, 0.2, {"popsize": self.population_size}
         )
-        iterations = 0
-        while True:
-            print(f"Iteration: {iterations}")
+        for epoch in tqdm(
+            range(initial_epoch, max_epochs + initial_epoch),
+            total=max_epochs,
+            desc="Calculating solutions with CMAES",
+            leave=False,
+        ):
             solutions = solver.ask()
             with ProcessPoolExecutor(max_workers=self.population_size) as executor:
                 results = list(
@@ -188,25 +202,16 @@ class ControllerTrainer:
                     )
                 )
 
-            all_frames = [result[0] for result in results]
-            fitlist = [result[1] for result in results]
-
             if self.render:
+                all_frames = [result[0] for result in results]
                 self.animate_rollouts(all_frames)
-
+            fitlist = [result[1] for result in results]
             solver.tell(solutions, fitlist)
             bestsol, bestfit, *_ = solver.result
-            print(f"Best fitness in iteration {iterations}: {bestfit}")
-
+            print(f"Best fitness in epoch {epoch}: {bestfit}")
             if bestfit > 900:
-                print("Task solved!")
-                print(f"Best solution: {bestsol}")
+                print(f"Best solution found : {bestfit}")
                 break
-            if iterations >= max_iterations:
-                print("Task not solved!")
-                print(f"Best solution: {bestsol}")
-                break
-            iterations += 1
 
         self.controller.set_weights(bestsol)
         save_path.parent.mkdir(parents=True, exist_ok=True)

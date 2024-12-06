@@ -3,6 +3,8 @@
 from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass
 from functools import partial
+from multiprocessing import ProcessError
+import os
 from pathlib import Path
 from typing import Any, Callable, Iterable, Iterator, List, Literal, Optional, Tuple
 
@@ -66,7 +68,9 @@ class RolloutDataset(Dataset):
         self.max_steps = max_steps
         self.continuos = continuos
         self.env_name = env_name
-        self.root = root / ("continuos" if continuos else "discrete")
+        self.root = (
+            root / ("continuos" if continuos else "discrete") / f"{max_steps}steps"
+        )
         self.__transformation = transforms.Compose(
             [
                 transforms.ToPILImage(),
@@ -74,13 +78,19 @@ class RolloutDataset(Dataset):
                 transforms.ToTensor(),
             ]
         )
+        self.episodes_paths = self._load_dataset()
+
         if mode == "load":
-            self.episodes_paths = self._load_dataset()
-            if self.episodes_paths == []:
-                print(f"Dataset not found at {self.root}. Falling back to creation.")
+            if len(self.episodes_paths) < num_rollouts:
+                print(
+                    f"Complete dataset not found at {self.root}. Creating the missing ones."
+                )
                 self.episodes_paths = self._create_dataset()
         elif mode == "create":
-            self.episodes_paths = self._create_dataset()
+            if len(self.episodes_paths) > 0:
+                print(f"Already found {len(self.episodes_paths)} episodes.")
+            if len(self.episodes_paths) < num_rollouts:
+                self.episodes_paths = self._create_dataset()
             print(f"Created dataset with {len(self.episodes_paths)} episodes.")
         elif mode == "from":
             if episodes is None:
@@ -92,37 +102,49 @@ class RolloutDataset(Dataset):
             )
         if self.episodes_paths == []:
             raise ValueError("Cannot create a RolloutDataset without episodes.")
+        self.episodes_paths = [
+            episode_path
+            for episode_path in self.episodes_paths
+            if episode_path.exists()
+        ]
+        self._reestablish_episode_ordering()
+
+    def _reestablish_episode_ordering(self):
+        """Reestablish correct episode numbering."""
+        if not self.root.exists():
+            return
+
+        # Find all episode files and sort them by their numeric suffix
+        episode_paths = sorted(
+            self.root.glob("episode_*.pt"),
+            key=lambda p: int(p.stem.split("_")[-1]),
+        )
+
+        # Rename episodes to have sequential numbering
+        for new_index, episode_path in enumerate(episode_paths):
+            new_path = self.root / f"episode_{new_index}.pt"
+            if episode_path != new_path:
+                os.rename(episode_path, new_path)
 
     def _create_dataset(self):
-        episodes = self._collect_and_filter_episodes(self.num_rollouts, self.max_steps)
-        return episodes
+        episodes_paths = self._collect_and_filter_episodes(
+            self.num_rollouts, self.max_steps
+        )
+        return episodes_paths
 
-    def _load_dataset(self):
+    def _load_dataset(self) -> list[Path]:
         if not self.root.exists():
             return []
         episode_paths = [
-            episode_path for episode_path in sorted(self.root.glob("episode_*"))
+            episode_path
+            for episode_path in sorted(
+                self.root.glob("episode_*"), key=lambda p: int(p.stem.split("_")[-1])
+            )
         ]
         return episode_paths
 
     def _sampling_strategy(self, recent_acceleration: bool):
         if self.continuos:
-            # Dict continuos actions
-            # {
-            #     "dtype": dtype("float32"),
-            #     "bounded_below": array([True, True, True]),
-            #     "bounded_above": array([True, True, True]),
-            #     "_shape": (3,),
-            #     "low": array([-1.0, 0.0, 0.0], dtype=float32),
-            #     "high": array([1.0, 1.0, 1.0], dtype=float32),
-            #     "low_repr": "[-1.  0.  0.]",
-            #     "high_repr": "1.0",
-            #     "_np_random": None,
-            # }
-            # [steering, acceleration, brake]
-            # Idealmente vogliamo che la acc abbia un bias verso l'essere 1
-            # mentre la dec abbia un bias verso l'essere 0
-            # https://homepage.divms.uiowa.edu/~mbognar/applets/normal.html
             action = np.random.normal([0, 0.75, 0.25], [0.5, 0.1, 0.1])
             action[0] = action[0].clip(-1, 1)
             action[1] = action[1].clip(0, 1)
@@ -141,80 +163,72 @@ class RolloutDataset(Dataset):
                 recent_acceleration = action == 3
         return action, recent_acceleration
 
-    def _execute_single_rollout(self, max_steps: int, _index: int = 0) -> Episode:
-        observations, actions, rewards = [], [], []
-        env = gym.make(
-            id=self.env_name,
-            continuous=self.continuos,
-            # domain_randomize=True
-        )
+    def _execute_single_rollout(self, max_steps: int, index: int = 0) -> Optional[Path]:
+        try:
+            observations, actions, rewards = [], [], []
+            env = gym.make(
+                id=self.env_name,
+                continuous=self.continuos,
+            )
 
-        observation, _ = env.reset()
-        recent_acceleration = False
-        for _ in range(max_steps):
-            action, recent_acceleration = self._sampling_strategy(recent_acceleration)
-            next_observation, reward, done, _, _ = env.step(action)
-            observation = self.__transformation(observation)
-            observations.append(observation)
-            action = torch.from_numpy(action)
-            actions.append(action)
-            reward = torch.tensor(reward)
-            rewards.append(reward)
-            observation = next_observation
-            if done:
-                break
-        observations = torch.stack(observations)
-        actions = torch.stack(actions).to(dtype=torch.float32)
-        rewards = torch.stack(rewards).to(dtype=torch.float32)
-        return Episode(observations=observations, actions=actions, rewards=rewards)
+            observation, _ = env.reset()
+            recent_acceleration = False
+            for _ in range(max_steps):
+                action, recent_acceleration = self._sampling_strategy(
+                    recent_acceleration
+                )
+                next_observation, reward, done, _, _ = env.step(action)
+                observation = self.__transformation(observation)
+                observations.append(observation)
+                action = torch.from_numpy(action)
+                actions.append(action)
+                reward = torch.tensor(reward)
+                rewards.append(reward)
+                observation = next_observation
+                if done:
+                    break
+            observations = torch.stack(observations)
+            actions = torch.stack(actions).to(dtype=torch.float32)
+            rewards = torch.stack(rewards).to(dtype=torch.float32)
+            episode = Episode(
+                observations=observations, actions=actions, rewards=rewards
+            )
+            if observations.shape[0] != max_steps:
+                return
+            return episode.save(self.root / f"episode_{index}.pt")
+        except ProcessError as e:
+            print(e)
+        except Exception as e:
+            print(e.__cause__)
 
     def _collect_and_filter_episodes(
         self, num_rollouts: int, max_steps: int
     ) -> List[Path]:
+        if len(self.episodes_paths) > num_rollouts:
+            return self.episodes_paths
         with ProcessPoolExecutor() as executor:
-            data = list(
+            episode_paths = list(
                 tqdm(
                     executor.map(
                         partial(self._execute_single_rollout, max_steps),
-                        range(num_rollouts),
+                        range(len(self.episodes_paths), num_rollouts),
                     ),
-                    total=num_rollouts,
+                    total=num_rollouts - len(self.episodes_paths),
                     desc="Collecting Rollouts",
                 )
             )
-        mean_length = int(
-            np.sum([len(episode.observations) for episode in data]) / len(data)
-        )
-        print(f"Mean episode length: {mean_length}")
-
-        filtered_episodes = [
-            Episode(
-                observations=episode.observations[:mean_length],
-                actions=episode.actions[:mean_length],
-                rewards=episode.rewards[:mean_length],
-            )
-            for episode in data
-            if len(episode.observations) >= mean_length
+        episode_paths = [
+            episode_path for episode_path in episode_paths if episode_path is not None
         ]
-        print(
-            "Completed collection and filtering of rollouts.\n"
-            + f"{len(filtered_episodes)} episodes retained."
-        )
+        return self.episodes_paths + episode_paths
 
-        filtered_episodes_path = [
-            episode.save(self.root / f"episode_{idx}.pt")
-            for idx, episode in enumerate(filtered_episodes)
-        ]
-        return filtered_episodes_path
-
-    def __getitem__(self, index):
+    def __getitem__(self, index) -> Path:
         episode_path = self.episodes_paths[index]
-        return Episode.load(episode_path)
+        return episode_path
 
     def __len__(self):
         return len(self.episodes_paths)
 
-    # TODO: Make it coherent w.r.t getitem
     def __iter__(self):
         return iter(self.episodes_paths)
 
@@ -261,9 +275,17 @@ class RolloutDataloader(DataLoader):
 
     @staticmethod
     def __collate_fn(batch) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        batch_observations = torch.stack([episode.observations for episode in batch])
-        batch_actions = torch.stack([episode.actions for episode in batch])
-        batch_rewards = torch.stack([episode.rewards for episode in batch])
+        batch_observations = []
+        batch_actions = []
+        batch_rewards = []
+        for episode_path in batch:
+            episode = Episode.load(episode_path)
+            batch_observations.append(episode.observations)
+            batch_actions.append(episode.observations)
+            batch_rewards.append(episode.observations)
+        batch_observations = torch.stack(batch_observations)
+        batch_actions = torch.stack(batch_actions)
+        batch_rewards = torch.stack(batch_rewards)
 
         return batch_observations, batch_actions, batch_rewards
 
@@ -274,3 +296,7 @@ class RolloutDataloader(DataLoader):
         self,
     ) -> Iterator[Tuple[torch.Tensor, torch.Tensor, torch.Tensor]]:
         yield from super().__iter__()
+
+
+# rollout_dataset = RolloutDataset("create", 10, 30, continuos=True)
+# episode = rollout_dataset[0]

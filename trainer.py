@@ -163,12 +163,13 @@ def create_rollout_dataset(
     rollout_dataset = RolloutDataset(
         "create", num_rollouts, max_steps, continuos=continuos
     )
-    episode = rollout_dataset[0]
+    episode = Episode.load(rollout_dataset.episodes_paths[0])
     create_dataset_gif(episode)
 
 
 def train_vision(
     epochs: int = 10,
+    batch_size=64,
     continuos=True,
     num_rollouts: int = 10000,
     max_steps: int = 500,
@@ -195,9 +196,9 @@ def train_vision(
         "from",
         episodes=[rollout_dataset.episodes_paths[idx] for idx in val_episodes.indices],
     )
-    train_dataloader = RolloutDataloader(training_dataset, 64)
-    test_dataloader = RolloutDataloader(test_dataset, 64)
-    val_dataloader = RolloutDataloader(val_dataset, 64)
+    train_dataloader = RolloutDataloader(training_dataset, batch_size)
+    test_dataloader = RolloutDataloader(test_dataset, batch_size)
+    val_dataloader = RolloutDataloader(val_dataset, batch_size)
     vision = ConvVAE().to(DEVICE)
     vision_trainer = VisionTrainer()
     vision_trainer.train(
@@ -208,7 +209,7 @@ def train_vision(
         epochs=epochs,
         optimizer=torch.optim.Adam(vision.parameters()),
     )
-    episode = rollout_dataset[0]
+    episode = Episode.load(rollout_dataset.episodes_paths[0])
     create_vision_gif(episode, vision)
 
 
@@ -221,7 +222,11 @@ def create_latent(continuos=True, num_rollouts: int = 10000, max_steps: int = 50
 
 
 def train_memory(
-    epochs=10, continuos=True, num_rollouts: int = 10000, max_steps: int = 500
+    epochs=10,
+    batch_size: int = 64,
+    continuos=True,
+    num_rollouts: int = 10000,
+    max_steps: int = 500,
 ):
     rollout_dataset = RolloutDataset(
         "load", num_rollouts, max_steps, continuos=continuos
@@ -264,6 +269,8 @@ def train_memory(
         optimizer=torch.optim.Adam(memory.parameters()),
         epochs=epochs,
     )
+    episode = Episode.load(rollout_dataset.episodes_paths[0])
+    create_memory_gif(episode, vision, memory)
 
 
 def train_controller(
@@ -311,6 +318,9 @@ def main():
         "--epochs", type=int, default=10, help="Number of training epochs"
     )
     parser_train_vision.add_argument(
+        "--batch_size", type=int, default=64, help="Number of training epochs"
+    )
+    parser_train_vision.add_argument(
         "--continuos", type=bool, default=True, help="Whether the rollout is continuous"
     )
     parser_train_vision.add_argument(
@@ -340,6 +350,9 @@ def main():
     )
     parser_train_memory.add_argument(
         "--epochs", type=int, default=10, help="Number of training epochs"
+    )
+    parser_train_memory.add_argument(
+        "--batch_size", type=int, default=64, help="Batch size"
     )
     parser_train_memory.add_argument(
         "--continuos", type=bool, default=True, help="Whether the rollout is continuous"
@@ -377,11 +390,23 @@ def main():
     if args.command == "create_rollout_dataset":
         create_rollout_dataset(args.continuos, args.num_rollouts, args.max_steps)
     elif args.command == "train_vision":
-        train_vision(args.epochs, args.continuos, args.num_rollouts, args.max_steps)
+        train_vision(
+            args.epochs,
+            args.batch_size,
+            args.continuos,
+            args.num_rollouts,
+            args.max_steps,
+        )
     elif args.command == "create_latent":
         create_latent(args.continuos, args.num_rollouts, args.max_steps)
     elif args.command == "train_memory":
-        train_memory(args.epochs, args.continuos, args.num_rollouts, args.max_steps)
+        train_memory(
+            args.epochs,
+            args.batch_size,
+            args.continuos,
+            args.num_rollouts,
+            args.max_steps,
+        )
     elif args.command == "train_controller":
         train_controller(
             args.population_size,

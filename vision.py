@@ -118,12 +118,21 @@ class VisionTrainer:
     ) -> float:
         vision.train()
         train_loss = 0
-
-        for batch_episodes_observations, _, _ in train_dataloader:
-            batch_episodes_observations = batch_episodes_observations.to(
+        for batch_episodes_observations, _, _ in tqdm(
+            train_dataloader,
+            total=len(train_dataloader),
+            desc="Loading episode batches from the dataloader",
+            leave=False,
+        ):
+            episodes_batch_observations = batch_episodes_observations.to(
                 next(vision.parameters()).device
             ).permute(1, 0, 2, 3, 4)
-            for batch_observations in batch_episodes_observations:
+            for batch_observations in tqdm(
+                episodes_batch_observations,
+                total=episodes_batch_observations.shape[0],
+                desc="Processing timesteps for current episode batch",
+                leave=False,
+            ):
                 reconstruction, mu, log_sigma = vision.forward(batch_observations)
                 loss = vision.loss(reconstruction, batch_observations, mu, log_sigma)
                 optimizer.zero_grad()
@@ -142,12 +151,21 @@ class VisionTrainer:
     ) -> float:
         vision.eval()
         test_loss = 0
-
-        for batch_episodes_observations, _, _ in test_dataloader:
-            batch_episodes_observations = batch_episodes_observations.to(
+        for batch_episodes_observations, _, _ in tqdm(
+            test_dataloader,
+            total=len(test_dataloader),
+            desc="Loading episode batches from the dataloader",
+            leave=False,
+        ):
+            episodes_batch_observations = batch_episodes_observations.to(
                 next(vision.parameters()).device
             ).permute(1, 0, 2, 3, 4)
-            for batch_observations in batch_episodes_observations:
+            for batch_observations in tqdm(
+                episodes_batch_observations,
+                total=episodes_batch_observations.shape[0],
+                desc="Testing timesteps for current episode batch",
+                leave=False,
+            ):
                 reconstruction, mu, log_sigma = vision.forward(batch_observations)
                 loss = vision.loss(reconstruction, batch_observations, mu, log_sigma)
                 test_loss += loss.item()
@@ -164,11 +182,18 @@ class VisionTrainer:
         optimizer: torch.optim.Optimizer,
         val_dataloader: Optional[RolloutDataloader] = None,
         epochs: int = 10,
-        save_path=Path("models/vision.pt"),
+        save_path=Path("models"),
     ):
-        vision.to(next(vision.parameters()).device)
-
-        for epoch in tqdm(range(epochs), total=epochs):
+        if save_path.exists():
+            checkpoint_path = sorted(
+                save_path.glob("vision_epoch_*"),
+                key=lambda p: int(p.stem.split("_")[-1]),
+            )
+            if len(checkpoint_path) > 0:
+                loaded_data = torch.load(checkpoint_path[-1], weight_only=True)
+                vision.load_state_dict(loaded_data)
+        save_path.parent.mkdir(parents=True, exist_ok=True)
+        for epoch in tqdm(range(epochs), total=epochs, desc="Training Vision"):
             train_loss = self._train_step(
                 vision,
                 train_dataloader,
@@ -180,9 +205,10 @@ class VisionTrainer:
                 + f"Train Loss: {train_loss:.4f} | "
                 + f"Test Loss: {test_loss:.4f}"
             )
+            checkpoint_save_path = save_path / f"vision_epoch{epoch}.pt"
+            torch.save(vision.state_dict(), checkpoint_save_path)
         if val_dataloader is not None:
             val_loss = self._test_step(vision, test_dataloader)
             print(f"Validation Loss: {val_loss:.4f}")
-        save_path.parent.mkdir(parents=True, exist_ok=True)
-        torch.save(vision.state_dict(), save_path)
+        torch.save(vision.state_dict(), save_path / "vision.pt")
         print(f"Model saved to {save_path}")

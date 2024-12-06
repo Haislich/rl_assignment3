@@ -124,7 +124,12 @@ class MemoryTrainer:
             batch_latent_episodes_observations,
             batch_latent_episodes_actions,
             _,
-        ) in train_dataloader:
+        ) in tqdm(
+            train_dataloader,
+            total=len(train_dataloader),
+            desc="Processing latent episode batches during training",
+            leave=False,
+        ):
             device = next(memory.parameters()).device
             batch_latent_episodes_observations = batch_latent_episodes_observations.to(
                 device
@@ -155,8 +160,12 @@ class MemoryTrainer:
             batch_latent_episodes_observations,
             batch_latent_episodes_actions,
             _,
-        ) in test_dataloader:
-            # Move data to the correct device
+        ) in tqdm(
+            test_dataloader,
+            total=len(test_dataloader),
+            desc="Processing latent episode batches during testing",
+            leave=False,
+        ):
             device = next(memory.parameters()).device
             batch_latent_episodes_observations = batch_latent_episodes_observations.to(
                 device
@@ -180,25 +189,31 @@ class MemoryTrainer:
         optimizer: torch.optim.Optimizer,
         val_dataloader: Optional[LatentDataloader] = None,
         epochs: int = 10,
-        save_path: Path = Path("models/memory_continuos.pt"),
+        save_path: Path = Path("models"),
     ):
-
+        if save_path.exists():
+            checkpoint_path = sorted(
+                save_path.glob("memory_epoch_*"),
+                key=lambda p: int(p.stem.split("_")[-1]),
+            )
+            if len(checkpoint_path) > 0:
+                loaded_data = torch.load(checkpoint_path[-1], weight_only=True)
+                memory.load_state_dict(loaded_data)
+        save_path.parent.mkdir(parents=True, exist_ok=True)
         for epoch in tqdm(range(epochs), total=epochs):
             print(f"Epoch {epoch + 1}/{epochs}")
             train_loss = self._train_step(memory, train_dataloader, optimizer)
             test_loss = self._test_step(memory, test_dataloader)
             # scheduler.step()
-
             print(
                 f"Epoch {epoch + 1}/{epochs} | "
                 f"Train Loss: {train_loss:.4f} | "
                 f"Test Loss: {test_loss:.4f}"
             )
+            checkpoint_save_path = save_path / f"memory_epoch{epoch}.pt"
+            torch.save(memory.state_dict(), checkpoint_save_path)
         if val_dataloader is not None:
             val_loss = self._test_step(memory, test_dataloader)
             print(f"Validation Loss: {val_loss:.4f}")
-        # Save the model
-        save_path.parent.mkdir(parents=True, exist_ok=True)
-
         torch.save(memory.state_dict(), save_path)
         print(f"Model saved to {save_path}")
