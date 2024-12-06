@@ -153,14 +153,14 @@ class RolloutDataset(Dataset):
         recent_acceleration = False
         for _ in range(max_steps):
             action, recent_acceleration = self._sampling_strategy(recent_acceleration)
-            next_obs, reward, done, _, _ = env.step(action)
+            next_observation, reward, done, _, _ = env.step(action)
             observation = self.__transformation(observation)
             observations.append(observation)
             action = torch.from_numpy(action)
             actions.append(action)
             reward = torch.tensor(reward)
             rewards.append(reward)
-            observation = next_obs
+            observation = next_observation
             if done:
                 break
         observations = torch.stack(observations)

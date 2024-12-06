@@ -32,33 +32,40 @@ class MDN_RNN(nn.Module):
         self.fc_mu = nn.Linear(hidden_units, num_mixtures * latent_dimension)
         self.fc_log_sigma = nn.Linear(hidden_units, num_mixtures * latent_dimension)
 
+    def init_hidden(
+        self,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        hidden_state = torch.zeros(1, 1, self.hidden_dim)
+        cell_state = torch.zeros(1, 1, self.hidden_dim)
+        return hidden_state, cell_state
+
     def forward(
         self,
         latents: torch.Tensor,
         actions: torch.Tensor,
-        hidden_state: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        hidden_state: Optional[torch.Tensor] = None,
+        cell_state: Optional[torch.Tensor] = None,
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         if not self.continuos:
             actions = actions.unsqueeze(-1)
+
+        # print(latents.shape)
+        # print(actions.shape)
+        # print(hidden_state)
         rnn_out, (hidden_state, _cell_state) = self.rnn(
             torch.cat([latents, actions], dim=-1),
-            hidden_state,
+            (
+                None
+                if hidden_state is None or cell_state is None
+                else (hidden_state, cell_state)
+            ),
         )
-        print(latents.shape)
-        print(actions.shape)
+
         pi = F.softmax(self.fc_pi(rnn_out), dim=-1)
         mu = self.fc_mu(rnn_out)
         log_sigma = self.fc_log_sigma(rnn_out)
         sigma = torch.exp(log_sigma)
-        return pi, mu, sigma, hidden_state  # type:ignore
-
-    def __call__(
-        self,
-        latents: torch.Tensor,
-        actions: torch.Tensor,
-        hidden: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        return self.forward(latents, actions, hidden)
+        return pi, mu, sigma, hidden_state, cell_state  # type:ignore
 
     def loss(
         self,
@@ -132,7 +139,7 @@ class MemoryTrainer:
             )
             batch_latent_episodes_actions = batch_latent_episodes_actions.to(device)
             target = batch_latent_episodes_observations[:, 1:, :]
-            pi, mu, sigma, _ = memory(
+            pi, mu, sigma, *_ = memory(
                 batch_latent_episodes_observations[:, :-1],
                 batch_latent_episodes_actions[:, :-1],
             )
@@ -164,7 +171,7 @@ class MemoryTrainer:
             )
             batch_latent_episodes_actions = batch_latent_episodes_actions.to(device)
             target = batch_latent_episodes_observations[:, 1:, :]
-            pi, mu, sigma, _ = memory(
+            pi, mu, sigma, *_ = memory(
                 batch_latent_episodes_observations[:, :-1],
                 batch_latent_episodes_actions[:, :-1],
             )
