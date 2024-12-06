@@ -5,11 +5,9 @@ from typing import Optional
 import torch
 import torch.nn.functional as F
 from torch import nn
-from rollout_dataset import RolloutDataloader, Episode
-import torchvision.transforms as T
-from PIL import Image
+from rollout_dataset import RolloutDataloader
 
-DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+from tqdm import tqdm
 
 
 class Encoder(nn.Module):
@@ -32,10 +30,6 @@ class Encoder(nn.Module):
         log_sigma = self.fc_sigma(x)
         return mu, log_sigma
 
-    # Trick pylint into hinting
-    def __call__(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        return self.forward(x)
-
 
 class Decoder(nn.Module):
     def __init__(self, latent_dimension: int, image_channels: int, *, stride: int = 2):
@@ -57,10 +51,6 @@ class Decoder(nn.Module):
         x = torch.sigmoid(self.sigmoid_deconv(x))
         return x
 
-    # Trick pylint into hinting
-    def __call__(self, x: torch.Tensor) -> torch.Tensor:
-        return self.forward(x)
-
 
 class ConvVAE(nn.Module):
     def __init__(self, latent_dimension: int = 32, image_channels: int = 3):
@@ -80,7 +70,7 @@ class ConvVAE(nn.Module):
         return reconstruction, mu, log_sigma
 
     def get_latent(self, observation: torch.Tensor) -> torch.Tensor:
-        mu, log_sigma = self.encoder(observation)
+        mu, log_sigma = self.encoder.forward(observation)
         sigma = log_sigma.exp()
         return mu + sigma * torch.randn_like(sigma)
 
@@ -134,7 +124,7 @@ class VisionTrainer:
                 next(vision.parameters()).device
             ).permute(1, 0, 2, 3, 4)
             for batch_observations in batch_episodes_observations:
-                reconstruction, mu, log_sigma = vision(batch_observations)
+                reconstruction, mu, log_sigma = vision.forward(batch_observations)
                 loss = vision.loss(reconstruction, batch_observations, mu, log_sigma)
                 optimizer.zero_grad()
                 loss.backward()
@@ -158,7 +148,7 @@ class VisionTrainer:
                 next(vision.parameters()).device
             ).permute(1, 0, 2, 3, 4)
             for batch_observations in batch_episodes_observations:
-                reconstruction, mu, log_sigma = vision(batch_observations)
+                reconstruction, mu, log_sigma = vision.forward(batch_observations)
                 loss = vision.loss(reconstruction, batch_observations, mu, log_sigma)
                 test_loss += loss.item()
                 test_loss /= batch_observations.shape[0]
@@ -178,7 +168,7 @@ class VisionTrainer:
     ):
         vision.to(next(vision.parameters()).device)
 
-        for epoch in range(epochs):
+        for epoch in tqdm(range(epochs), total=epochs):
             train_loss = self._train_step(
                 vision,
                 train_dataloader,

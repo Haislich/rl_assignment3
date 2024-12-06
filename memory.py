@@ -4,12 +4,8 @@ import torch
 from torch import nn
 import torch.nn.functional as F
 import torch.optim.adam
+from tqdm import tqdm
 from latent_dataset import LatentDataloader
-import torchvision.transforms as T
-from PIL import Image
-
-
-DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
 
 class MDN_RNN(nn.Module):
@@ -186,7 +182,8 @@ class MemoryTrainer:
         epochs: int = 10,
         save_path: Path = Path("models/memory_continuos.pt"),
     ):
-        for epoch in range(epochs):
+
+        for epoch in tqdm(range(epochs), total=epochs):
             print(f"Epoch {epoch + 1}/{epochs}")
             train_loss = self._train_step(memory, train_dataloader, optimizer)
             test_loss = self._test_step(memory, test_dataloader)
