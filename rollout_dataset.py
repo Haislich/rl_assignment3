@@ -57,7 +57,7 @@ class RolloutDataset(Dataset):
         ] = "load",  # Modes: "create", "load", or "from"
         num_rollouts: int = 1,
         max_steps: int = 1,
-        continuos: bool = False,
+        continuos: bool = True,
         env_name: str = "CarRacing-v2",
         episodes: Optional[List[Path]] = None,
         root: Path = Path("./data/rollouts"),
@@ -274,19 +274,3 @@ class RolloutDataloader(DataLoader):
         self,
     ) -> Iterator[Tuple[torch.Tensor, torch.Tensor, torch.Tensor]]:
         yield from super().__iter__()
-
-
-if __name__ == "__main__":
-
-    dataset = RolloutDataset("create", continuos=False)
-
-#     train_episodes, test_episodes, eval_episodes = torch.utils.data.random_split(
-#         dataset, [0.5, 0.3, 0.2]
-#     )
-#     train_dataset = RolloutDataset(
-#         "from", episodes=[dataset.episodes[idx] for idx in train_episodes.indices]
-#     )
-#     dataloader = RolloutDataloader(train_dataset, batch_size=3)
-
-#     for elem1, elem2, elem3 in dataloader:
-#         print(elem1.shape)

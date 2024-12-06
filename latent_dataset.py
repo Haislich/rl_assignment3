@@ -8,7 +8,7 @@ import torch
 from torch.utils.data import DataLoader, Dataset
 from torch.utils.data.sampler import Sampler
 
-from dataset import Episode, RolloutDataset
+from rollout_dataset import Episode, RolloutDataset
 from vision import ConvVAE
 
 
@@ -175,11 +175,3 @@ class LatentDataloader(DataLoader):
         self,
     ) -> Iterator[Tuple[torch.Tensor, torch.Tensor, torch.Tensor]]:
         yield from super().__iter__()
-
-
-# if __name__ == "__main__":
-#     rollout_dataset = RolloutDataset("load")
-#     vision = ConvVAE.from_pretrained()
-#     latent_dataset = LatentDataset(rollout_dataset, vision, "create")
-#     for latent_episode_path in latent_dataset:
-#         print(LatentEpisode.load(latent_episode_path).latent_observations.shape)

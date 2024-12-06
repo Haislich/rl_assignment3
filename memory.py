@@ -18,7 +18,7 @@ class MDN_RNN(nn.Module):
         latent_dimension: int = 32,
         hidden_units: int = 256,
         num_mixtures: int = 5,
-        continuos=False,
+        continuos=True,
     ):
         super().__init__()
         self.hidden_dim = hidden_units
@@ -48,10 +48,6 @@ class MDN_RNN(nn.Module):
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         if not self.continuos:
             actions = actions.unsqueeze(-1)
-
-        # print(latents.shape)
-        # print(actions.shape)
-        # print(hidden_state)
         rnn_out, (hidden_state, _cell_state) = self.rnn(
             torch.cat([latents, actions], dim=-1),
             (
@@ -109,7 +105,7 @@ class MDN_RNN(nn.Module):
 
     @staticmethod
     def from_pretrained(
-        model_path: Path = Path("models/memory_discrete.pt"),
+        model_path: Path = Path("models/memory_continuos.pt"),
     ) -> "MDN_RNN":
         if not model_path.exists():
             raise FileNotFoundError(f"Couldn't find the Mdn-RNN model at {model_path}")
@@ -188,25 +184,8 @@ class MemoryTrainer:
         optimizer: torch.optim.Optimizer,
         val_dataloader: Optional[LatentDataloader] = None,
         epochs: int = 10,
-        save_path: Path = Path("models/memory.pt"),
+        save_path: Path = Path("models/memory_continuos.pt"),
     ):
-        # if memory.continuos and not train_dataloader.dataset.continuos:  # type: ignore
-        #     raise ValueError(
-        #         f"Cannot train a {'continuos' if memory.continuos else 'discrete'} {type(memory)}"
-        #         + f"using a {'continuos' if train_dataloader.dataset.continuos else 'discrete'} {type(train_dataloader.dataset)}"  # type: ignore
-        #     )
-        # if memory.continuos and not test_dataloader.dataset.continuos:  # type: ignore
-        #     raise ValueError(
-        #         f"Cannot train a {'continuos' if memory.continuos else 'discrete'} {type(memory)}"
-        #         + f"using a {'continuos' if test_dataloader.dataset.continuos else 'discrete'} {type(test_dataloader.dataset)}"  # type: ignore
-        #     )
-        # if memory.continuos and not val_dataloader.dataset.continuos:  # type: ignore
-        #     raise ValueError(
-        #         f"Cannot train a {'continuos' if memory.continuos else 'discrete'} {type(memory)}"
-        #         + f"using a {'continuos' if val_dataloader.dataset.continuos else 'discrete'} {type(val_dataloader.dataset)}"  # type: ignore
-        #     )
-        # scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=10, gamma=0.5)
-
         for epoch in range(epochs):
             print(f"Epoch {epoch + 1}/{epochs}")
             train_loss = self._train_step(memory, train_dataloader, optimizer)
@@ -226,69 +205,3 @@ class MemoryTrainer:
 
         torch.save(memory.state_dict(), save_path)
         print(f"Model saved to {save_path}")
-
-
-if __name__ == "__main__":
-    from dataset import RolloutDataset
-    from latent_dataset import LatentDataset, LatentDataloader
-    from vision import ConvVAE
-
-    CONTINUOS = True
-    rollout_dataset = RolloutDataset(
-        "create",
-        num_rollouts=10,
-        max_steps=10,
-        continuos=CONTINUOS,
-    )
-
-    vision = ConvVAE.from_pretrained().to(DEVICE)
-
-    train_episodes, test_episodes, val_episodes = torch.utils.data.random_split(
-        rollout_dataset, [0.5, 0.3, 0.2]
-    )
-    training_set = LatentDataset(
-        RolloutDataset(
-            "from",
-            episodes=[
-                rollout_dataset.episodes_paths[idx] for idx in train_episodes.indices
-            ],
-            continuos=CONTINUOS,
-        ),
-        vision,
-        "create",
-    )
-    test_set = LatentDataset(
-        RolloutDataset(
-            "from",
-            episodes=[
-                rollout_dataset.episodes_paths[idx] for idx in test_episodes.indices
-            ],
-            continuos=CONTINUOS,
-        ),
-        vision,
-        "create",
-    )
-    val_set = LatentDataset(
-        RolloutDataset(
-            "from",
-            episodes=[
-                rollout_dataset.episodes_paths[idx] for idx in val_episodes.indices
-            ],
-            continuos=CONTINUOS,
-        ),
-        vision,
-        "create",
-    )
-
-    train_dataloader = LatentDataloader(training_set, 64)
-    test_dataloader = LatentDataloader(test_set, 64)
-    test_dataloader = LatentDataloader(val_set, 64)
-    memory = MDN_RNN(continuos=CONTINUOS).to(DEVICE)
-    memory_trainer = MemoryTrainer()
-    memory_trainer.train(
-        memory,
-        train_dataloader,
-        test_dataloader,
-        torch.optim.Adam(memory.parameters()),
-        save_path=Path("models/memory_continuos.pt"),
-    )

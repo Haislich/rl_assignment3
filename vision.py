@@ -5,7 +5,7 @@ from typing import Optional
 import torch
 import torch.nn.functional as F
 from torch import nn
-from dataset import RolloutDataloader, Episode
+from rollout_dataset import RolloutDataloader, Episode
 import torchvision.transforms as T
 from PIL import Image
 
@@ -196,94 +196,3 @@ class VisionTrainer:
         save_path.parent.mkdir(parents=True, exist_ok=True)
         torch.save(vision.state_dict(), save_path)
         print(f"Model saved to {save_path}")
-
-
-def create_gif(
-    episode: Episode,
-    vision: ConvVAE,
-    save_path=Path("vae_reconstruction.gif"),
-):
-    observations = episode.observations.unsqueeze(0).to(DEVICE)
-    latents = vision.get_batched_latents(observations)
-    vae_reconstructions = vision.decoder(latents.squeeze(0))
-    scale_factor = 1
-    spacing = 1
-    img_width, img_height = 64 * scale_factor, 64 * scale_factor
-    total_width = img_width * 2 + spacing * 2
-    total_height = img_height
-
-    images = []
-    for t in range(vae_reconstructions.shape[0]):
-        original_img = T.Resize((img_height, img_width))(
-            T.ToPILImage()(observations[0, t].cpu())
-        )
-        vae_img = T.Resize((img_height, img_width))(
-            T.ToPILImage()(vae_reconstructions[t].cpu())
-        )
-        combined_img = Image.new("RGB", (total_width, total_height), (0, 0, 0))
-        combined_img.paste(original_img, (0, 0))
-        combined_img.paste(vae_img, (img_width + spacing, 0))
-        images.append(combined_img)
-
-    save_path.parent.mkdir(parents=True, exist_ok=True)
-    # Save as GIF
-    images[0].save(
-        save_path,
-        save_all=True,
-        append_images=images[1:],
-        duration=60,  # Increase duration for slower playback
-        loop=0,
-    )
-    print(f"Vae reconstruction GIF saved to {save_path}")
-
-
-if __name__ == "__main__":
-    from dataset import RolloutDataset, RolloutDataloader
-
-    CONTINUOS = True
-    dataset = RolloutDataset(
-        "create",
-        num_rollouts=20,
-        max_steps=20,
-        continuos=CONTINUOS,
-    )
-    (
-        train_episodes,
-        test_episodes,
-        eval_episodes,
-    ) = torch.utils.data.random_split(dataset, [0.5, 0.3, 0.2])
-    training_set = RolloutDataset(
-        "from",
-        episodes=[dataset.episodes_paths[idx] for idx in train_episodes.indices],
-        continuos=CONTINUOS,
-    )
-    test_set = RolloutDataset(
-        "from",
-        episodes=[dataset.episodes_paths[idx] for idx in test_episodes.indices],
-        continuos=CONTINUOS,
-    )
-    eval_set = RolloutDataset(
-        "from",
-        episodes=[dataset.episodes_paths[idx] for idx in eval_episodes.indices],
-        continuos=CONTINUOS,
-    )
-
-    train_dataloader = RolloutDataloader(training_set, 64)
-    test_dataloader = RolloutDataloader(test_set, 64)
-    # vision = ConvVAE().from_pretrained().to(DEVICE)
-    vision = ConvVAE().to(DEVICE)
-    vision_trainer = VisionTrainer()
-    vision_trainer.train(
-        vision,
-        train_dataloader,
-        test_dataloader,
-        torch.optim.Adam(vision.parameters()),
-        epochs=1,
-    )
-    for i in range(10):
-
-        create_gif(
-            Episode.load(dataset.episodes_paths[i]),
-            vision,
-            save_path=Path("vae_reconstructions") / f"reconstruction{i}.gif",
-        )

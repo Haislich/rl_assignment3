@@ -15,8 +15,6 @@ from torchvision import transforms
 from memory import MDN_RNN
 from vision import ConvVAE
 
-DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-
 
 class Controller(nn.Module):
     def __init__(
@@ -62,6 +60,7 @@ class ControllerTrainer:
         memory,
         population_size=4,
         env_name="CarRacing-v2",
+        render=False,
     ):
         self.controller = controller
         self.vision = vision
@@ -72,6 +71,7 @@ class ControllerTrainer:
         self.controllers = [
             copy.deepcopy(controller) for _ in range(self.population_size)
         ]
+        self.render = render
         self.__transformation = transforms.Compose(
             [
                 transforms.ToPILImage(),
@@ -80,29 +80,33 @@ class ControllerTrainer:
             ]
         )
 
+    @staticmethod
+    def from_pretrained(
+        model_path: Path = Path("models/controller_continuos.pt"),
+    ) -> "MDN_RNN":
+        if not model_path.exists():
+            raise FileNotFoundError(f"Couldn't find the Mdn-RNN model at {model_path}")
+        loaded_data = torch.load(model_path, weights_only=True)
+        controller = MDN_RNN(continuos="continuos" in model_path.name)
+        controller.load_state_dict(loaded_data)
+        return controller
+
     def _get_rows_and_cols(self):
-        # Start with the square root of num_elements
         sqrt_num = math.sqrt(self.population_size)
         n_rows = math.floor(sqrt_num)
         n_cols = math.ceil(self.population_size / n_rows)
-
-        # Ensure the product matches num_elements
         while n_rows * n_cols < self.population_size:
             n_rows += 1
             n_cols = math.ceil(self.population_size / n_rows)
-
         return n_rows, n_cols
 
     def _rollout(self, index: int):
-        """Perform a single rollout, collecting observations for visualization."""
         environment = gym.make(self.env_name, render_mode="rgb_array")
         observation, _ = environment.reset()
         hidden_state, cell_state = self.memory.init_hidden()
         cumulative_reward = 0
         frames = []  # Collect frames for visualization
         cnt = 0
-        # print(index)
-        # exit()
         while True:
             cnt += 1
             frames.append(observation)
@@ -149,16 +153,17 @@ class ControllerTrainer:
         anim = FuncAnimation(fig, update, frames=max_frames, interval=50, blit=True)
         plt.show()
 
-    def train(self, max_iterations=1):
+    def train(
+        self,
+        max_iterations=1,
+        save_path: Path = Path("models/controller_continuos.pt"),
+    ):
         initial_solution = self.controller.get_weights()
         print(f"Initial solution size: {len(initial_solution)}")
-
         solver = CMAEvolutionStrategy(
             initial_solution, 0.2, {"popsize": self.population_size}
         )
-
         iterations = 0
-
         while True:
             print(f"Iteration: {iterations}")
             solutions = solver.ask()
@@ -171,16 +176,13 @@ class ControllerTrainer:
                     )
                 )
 
-            # Extract frames and rewards
             all_frames = [result[0] for result in results]
             fitlist = [result[1] for result in results]
 
-            # Animate rollouts
-            self.animate_rollouts(all_frames)
+            if self.render:
+                self.animate_rollouts(all_frames)
 
-            # Update CMA-ES solver
             solver.tell(solutions, fitlist)
-
             bestsol, bestfit, *_ = solver.result
             print(f"Best fitness in iteration {iterations}: {bestfit}")
 
@@ -192,12 +194,16 @@ class ControllerTrainer:
                 print("Task not solved!")
                 print(f"Best solution: {bestsol}")
                 break
-
             iterations += 1
+
+        self.controller.set_weights(bestsol)
+        save_path.parent.mkdir(parents=True, exist_ok=True)
+        torch.save(controller.state_dict(), save_path)
+        print(f"Model saved to {save_path}")
 
 
 vision = ConvVAE.from_pretrained().to("cpu")
-memory = MDN_RNN.from_pretrained(Path("models/memory_continuos.pt")).to("cpu")
-controller = Controller(continuos=True).to("cpu")
+memory = MDN_RNN.from_pretrained().to("cpu")
+controller = Controller().to("cpu")
 controller_trainer = ControllerTrainer(controller, vision, memory, population_size=11)
 controller_trainer.train(3)
