@@ -1,16 +1,19 @@
+import copy
+import math
 from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
+
+import gymnasium as gym
+import matplotlib.pyplot as plt
+import numpy as np
 import torch
+from cma import CMAEvolutionStrategy
+from matplotlib.animation import FuncAnimation
 from torch import nn
+from torchvision import transforms
+
 from memory import MDN_RNN
 from vision import ConvVAE
-from cma import CMAEvolutionStrategy
-from multiprocessing import Process, Queue
-import gymnasium as gym
-from torchvision import transforms
-import numpy as np
-
-import copy
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
@@ -54,10 +57,10 @@ class Controller(nn.Module):
 class ControllerTrainer:
     def __init__(
         self,
-        controller: Controller,
-        vision: ConvVAE,
-        memory: MDN_RNN,
-        population_size=32,
+        controller,
+        vision,
+        memory,
+        population_size=4,
         env_name="CarRacing-v2",
     ):
         self.controller = controller
@@ -65,6 +68,10 @@ class ControllerTrainer:
         self.memory = memory
         self.population_size = population_size
         self.env_name = env_name
+        self.n_rows, self.n_cols = self._get_rows_and_cols()
+        self.controllers = [
+            copy.deepcopy(controller) for _ in range(self.population_size)
+        ]
         self.__transformation = transforms.Compose(
             [
                 transforms.ToPILImage(),
@@ -73,36 +80,74 @@ class ControllerTrainer:
             ]
         )
 
-    def _rollout(self, controller: Controller, seed=None):
-        env = gym.make(id=self.env_name, continuous=self.memory.continuos)
-        if seed is not None:
-            observation, _ = env.reset(seed=int(seed))
-        else:
-            observation, _ = env.reset()
+    def _get_rows_and_cols(self):
+        # Start with the square root of num_elements
+        sqrt_num = math.sqrt(self.population_size)
+        n_rows = math.floor(sqrt_num)
+        n_cols = math.ceil(self.population_size / n_rows)
+
+        # Ensure the product matches num_elements
+        while n_rows * n_cols < self.population_size:
+            n_rows += 1
+            n_cols = math.ceil(self.population_size / n_rows)
+
+        return n_rows, n_cols
+
+    def _rollout(self, index: int):
+        """Perform a single rollout, collecting observations for visualization."""
+        environment = gym.make(self.env_name, render_mode="rgb_array")
+        observation, _ = environment.reset()
         hidden_state, cell_state = self.memory.init_hidden()
         cumulative_reward = 0
-
+        frames = []  # Collect frames for visualization
+        cnt = 0
+        # print(index)
+        # exit()
         while True:
+            cnt += 1
+            frames.append(observation)
             observation: torch.Tensor = self.__transformation(observation)
             latent_observation = self.vision.get_latent(observation.unsqueeze(0))
             latent_observation = latent_observation.unsqueeze(0)
-            action = controller.forward(latent_observation, hidden_state)
-
+            action = self.controller(latent_observation, hidden_state)
             numpy_action = action.detach().cpu().numpy().ravel()
-
-            next_observation, reward, done, _, _ = env.step(numpy_action)
-
+            next_observation, reward, done, _, _ = environment.step(numpy_action)
             cumulative_reward += float(reward)
             if done:
                 break
-
-            print(f"{latent_observation.shape=}")
-            print(f"{action.shape=}")
+            if cnt == 10 + index:
+                break
             _mu, _pi, _sigma, hidden_state, cell_state = self.memory.forward(
-                latent_observation, action, hidden_state, cell_state
+                latent_observation,
+                action,
+                hidden_state,
+                cell_state,
             )
             observation = next_observation
-        return cumulative_reward
+        environment.close()
+        return frames, cumulative_reward
+
+    def animate_rollouts(self, all_frames):
+        """Animate the collected frames after all rollouts are complete."""
+        fig, ax = plt.subplots(self.n_rows, self.n_cols, figsize=(10, 8))
+        ax = ax.flatten()
+        images = []
+        for axis in ax:
+            img = axis.imshow(np.zeros((64, 64, 3), dtype=np.uint8), vmin=0, vmax=255)
+            axis.axis("off")
+            images.append(img)
+
+        def update(frame):
+            for i, img in enumerate(images):
+                if i < len(all_frames) and frame < len(
+                    all_frames[i]
+                ):  # Ensure valid indices
+                    img.set_data(all_frames[i][frame])
+            return images
+
+        max_frames = max(len(frames) for frames in all_frames)
+        anim = FuncAnimation(fig, update, frames=max_frames, interval=50, blit=True)
+        plt.show()
 
     def train(self, max_iterations=1):
         initial_solution = self.controller.get_weights()
@@ -112,22 +157,28 @@ class ControllerTrainer:
             initial_solution, 0.2, {"popsize": self.population_size}
         )
 
-        controllers = [Controller() for _ in range(self.population_size)]
         iterations = 0
 
         while True:
             print(f"Iteration: {iterations}")
             solutions = solver.ask()
-            seeds = np.random.randint(0, int(1e6), size=(self.population_size,))
-            # fitlist = []
-            for controller, solution in zip(controllers, solutions):
-                controller.set_weights(solution)
-                # total_reward = self._rollout(controller, 3)
-                # fitlist.append(total_reward)
 
             with ProcessPoolExecutor(max_workers=self.population_size) as executor:
-                fitlist = list(executor.map(self._rollout, controllers, seeds))
+                results = list(
+                    executor.map(
+                        self._rollout,
+                        range(self.population_size),
+                    )
+                )
 
+            # Extract frames and rewards
+            all_frames = [result[0] for result in results]
+            fitlist = [result[1] for result in results]
+
+            # Animate rollouts
+            self.animate_rollouts(all_frames)
+
+            # Update CMA-ES solver
             solver.tell(solutions, fitlist)
 
             bestsol, bestfit, *_ = solver.result
@@ -148,5 +199,5 @@ class ControllerTrainer:
 vision = ConvVAE.from_pretrained().to("cpu")
 memory = MDN_RNN.from_pretrained(Path("models/memory_continuos.pt")).to("cpu")
 controller = Controller(continuos=True).to("cpu")
-controller_trainer = ControllerTrainer(controller, vision, memory, population_size=2)
-controller_trainer.train()
+controller_trainer = ControllerTrainer(controller, vision, memory, population_size=11)
+controller_trainer.train(3)
