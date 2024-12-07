@@ -4,8 +4,11 @@ import torch
 from torch import nn
 import torch.nn.functional as F
 import torch.optim.adam
+from torch.utils.tensorboard.writer import SummaryWriter
+
 from tqdm import tqdm
 from latent_dataset import LatentDataloader
+from math import ceil
 
 
 class MDN_RNN(nn.Module):
@@ -101,7 +104,7 @@ class MDN_RNN(nn.Module):
 
     @staticmethod
     def from_pretrained(
-        model_path: Path = Path("models/memory_continuos.pt"),
+        model_path: Path = Path("models/memory/memory_continuos.pt"),
     ) -> "MDN_RNN":
         if not model_path.exists():
             raise FileNotFoundError(f"Couldn't find the Mdn-RNN model at {model_path}")
@@ -112,13 +115,16 @@ class MDN_RNN(nn.Module):
 
 
 class MemoryTrainer:
+    def __init__(self, memory: MDN_RNN) -> None:
+        self.memory = memory
+        self.device = next(self.memory.parameters()).device
+
     def _train_step(
         self,
-        memory: MDN_RNN,
         train_dataloader: LatentDataloader,
         optimizer: torch.optim.Optimizer,
     ) -> float:
-        memory.train()
+        self.memory.train()
         train_loss = 0
         for (
             batch_latent_episodes_observations,
@@ -126,34 +132,37 @@ class MemoryTrainer:
             _,
         ) in tqdm(
             train_dataloader,
-            total=len(train_dataloader),
-            desc="Processing latent episode batches during training",
+            total=ceil(
+                len(train_dataloader) / train_dataloader.batch_size  # type:ignore
+            ),
+            desc="Processing latent episode batches",
             leave=False,
         ):
-            device = next(memory.parameters()).device
             batch_latent_episodes_observations = batch_latent_episodes_observations.to(
-                device
+                self.device
             )
-            batch_latent_episodes_actions = batch_latent_episodes_actions.to(device)
+            batch_latent_episodes_actions = batch_latent_episodes_actions.to(
+                self.device
+            )
             target = batch_latent_episodes_observations[:, 1:, :]
-            pi, mu, sigma, *_ = memory(
+            pi, mu, sigma, *_ = self.memory.forward(
                 batch_latent_episodes_observations[:, :-1],
                 batch_latent_episodes_actions[:, :-1],
             )
-            loss = memory.loss(pi, mu, sigma, target)
+            loss = self.memory.loss(pi, mu, sigma, target)
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
             train_loss += loss.item()
+
         train_loss /= len(train_dataloader)
         return train_loss
 
     def _test_step(
         self,
-        memory: MDN_RNN,
         test_dataloader: LatentDataloader,
     ) -> float:
-        memory.eval()
+        self.memory.eval()
         test_loss = 0
 
         for (
@@ -162,58 +171,85 @@ class MemoryTrainer:
             _,
         ) in tqdm(
             test_dataloader,
-            total=len(test_dataloader),
-            desc="Processing latent episode batches during testing",
+            total=ceil(
+                len(test_dataloader) / test_dataloader.batch_size  # type:ignore
+            ),
+            desc="Testing on latent episode batches",
             leave=False,
         ):
-            device = next(memory.parameters()).device
             batch_latent_episodes_observations = batch_latent_episodes_observations.to(
-                device
+                self.device
             )
-            batch_latent_episodes_actions = batch_latent_episodes_actions.to(device)
+            batch_latent_episodes_actions = batch_latent_episodes_actions.to(
+                self.device
+            )
             target = batch_latent_episodes_observations[:, 1:, :]
-            pi, mu, sigma, *_ = memory(
+            pi, mu, sigma, *_ = self.memory.forward(
                 batch_latent_episodes_observations[:, :-1],
                 batch_latent_episodes_actions[:, :-1],
             )
-            loss = memory.loss(pi, mu, sigma, target)
+            loss = self.memory.loss(pi, mu, sigma, target)
             test_loss += loss.item()
         test_loss /= len(test_dataloader)
         return test_loss
 
     def train(
         self,
-        memory: MDN_RNN,
         train_dataloader: LatentDataloader,
         test_dataloader: LatentDataloader,
         optimizer: torch.optim.Optimizer,
         val_dataloader: Optional[LatentDataloader] = None,
         epochs: int = 10,
         save_path: Path = Path("models"),
+        log_dir=Path("logs/memory"),
     ):
-        if save_path.exists():
-            checkpoint_path = sorted(
-                save_path.glob("memory_epoch_*"),
-                key=lambda p: int(p.stem.split("_")[-1]),
-            )
-            if len(checkpoint_path) > 0:
-                loaded_data = torch.load(checkpoint_path[-1], weight_only=True)
-                memory.load_state_dict(loaded_data)
-        save_path.parent.mkdir(parents=True, exist_ok=True)
-        for epoch in tqdm(range(epochs), total=epochs):
+        save_path = save_path / "memory"
+        save_path.mkdir(parents=True, exist_ok=True)
+
+        writer = SummaryWriter(log_dir=log_dir)
+        log_dir.mkdir(parents=True, exist_ok=True)
+
+        resume_epoch = 0
+        checkpoint_path = sorted(
+            save_path.glob("epoch_*.pt"),
+            key=lambda p: (int(p.stem.split("_")[1]),),  # Extract epoch number
+        )
+        if len(checkpoint_path) > 0:
+            last_checkpoint = checkpoint_path[-1]
+            checkpoint = torch.load(last_checkpoint, weights_only=True)
+            self.memory.load_state_dict(checkpoint["model_state"])
+            optimizer.load_state_dict(checkpoint["optimizer_state"])
+            resume_epoch = checkpoint["epoch"]
+
+        for epoch in tqdm(range(resume_epoch, epochs), total=epochs):
             print(f"Epoch {epoch + 1}/{epochs}")
-            train_loss = self._train_step(memory, train_dataloader, optimizer)
-            test_loss = self._test_step(memory, test_dataloader)
-            # scheduler.step()
-            print(
-                f"Epoch {epoch + 1}/{epochs} | "
-                f"Train Loss: {train_loss:.4f} | "
-                f"Test Loss: {test_loss:.4f}"
+            train_loss = self._train_step(
+                train_dataloader,
+                optimizer,
             )
-            checkpoint_save_path = save_path / f"memory_epoch{epoch}.pt"
-            torch.save(memory.state_dict(), checkpoint_save_path)
+            test_loss = self._test_step(test_dataloader)
+
+            # Log to TensorBoard
+            writer.add_scalar("Loss/Train", train_loss, epoch)
+            writer.add_scalar("Loss/Test", test_loss, epoch)
+            print()
+            print(
+                f"\tEpoch {epoch + 1}/{epochs} | "
+                f"Train Loss: {train_loss:.5f} | "
+                f"Test Loss: {test_loss:.5f}"
+            )
+            checkpoint_save_path = save_path / "epochs" / f"epoch_{epoch}.pt"
+            checkpoint_save_path.parent.mkdir(parents=True, exist_ok=True)
+            torch.save(
+                {
+                    "epoch": epoch,
+                    "model_state": self.memory.state_dict(),
+                    "optimizer_state": optimizer.state_dict(),
+                },
+                checkpoint_save_path,
+            )
         if val_dataloader is not None:
-            val_loss = self._test_step(memory, test_dataloader)
-            print(f"Validation Loss: {val_loss:.4f}")
-        torch.save(memory.state_dict(), save_path)
+            val_loss = self._test_step(test_dataloader)
+            print(f"Validation Loss: {val_loss:.5f}")
+        torch.save(self.memory.state_dict(), save_path / "memory.pt")
         print(f"Model saved to {save_path}")

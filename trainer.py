@@ -1,17 +1,15 @@
+import argparse
+from pathlib import Path
+
 import torch
 import torchvision.transforms as T
 from PIL import Image
-from pathlib import Path
 
-from rollout_dataset import RolloutDataset, RolloutDataloader, Episode
-from latent_dataset import LatentDataset, LatentDataloader
-
-
-from vision import ConvVAE, VisionTrainer
-from memory import MDN_RNN, MemoryTrainer
 from controller import Controller, ControllerTrainer
-
-import argparse
+from latent_dataset import LatentDataloader, LatentDataset
+from memory import MDN_RNN, MemoryTrainer
+from rollout_dataset import Episode, RolloutDataloader, RolloutDataset
+from vision import ConvVAE, VisionTrainer
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
@@ -22,7 +20,6 @@ def create_dataset_gif(
 ):
     observations = episode.observations.unsqueeze(0).to(DEVICE)
     scale_factor = 1
-    spacing = 1
     img_width, img_height = 64 * scale_factor, 64 * scale_factor
     total_width = img_width
     total_height = img_height
@@ -40,7 +37,7 @@ def create_dataset_gif(
         save_path,
         save_all=True,
         append_images=images[1:],
-        duration=200,  # Increase duration for slower playback
+        duration=len(images) / 60,
         loop=0,
     )
     print(f"Dataset GIF saved to {save_path}")
@@ -79,7 +76,7 @@ def create_vision_gif(
         save_path,
         save_all=True,
         append_images=images[1:],
-        duration=60,  # Increase duration for slower playback
+        duration=len(images) / 60,
         loop=0,
     )
     print(f"Vision reconstruction GIF saved to {save_path}")
@@ -90,7 +87,6 @@ def create_memory_gif(
     vision: ConvVAE,
     memory: MDN_RNN,
     save_path=Path("media/vision_memory_reconstruction.gif"),
-    display_gif_in_notebook=False,
 ):
     observations = episode.observations.unsqueeze(0).to(DEVICE)
     actions = episode.actions.unsqueeze(0).to(DEVICE)
@@ -151,7 +147,7 @@ def create_memory_gif(
         save_path,
         save_all=True,
         append_images=images[1:],
-        duration=60,
+        duration=len(images) / 60,
         loop=0,
     )
     print(f"Vision and Memory reconstruction GIF saved to {save_path}")
@@ -160,49 +156,34 @@ def create_memory_gif(
 def create_rollout_dataset(
     continuos=True, num_rollouts: int = 10000, max_steps: int = 500
 ):
-    rollout_dataset = RolloutDataset(
-        "create", num_rollouts, max_steps, continuos=continuos
-    )
+    rollout_dataset = RolloutDataset(num_rollouts, max_steps, continuos=continuos)
     episode = Episode.load(rollout_dataset.episodes_paths[0])
     create_dataset_gif(episode)
 
 
 def train_vision(
-    epochs: int = 10,
+    epochs: int = 1,
     batch_size=64,
     continuos=True,
     num_rollouts: int = 10000,
     max_steps: int = 500,
 ):
-    rollout_dataset = RolloutDataset(
-        "load", num_rollouts, max_steps, continuos=continuos
-    )
+    rollout_dataset = RolloutDataset(num_rollouts, max_steps, continuos=continuos)
+
     (
         train_episodes,
         test_episodes,
         val_episodes,
     ) = torch.utils.data.random_split(rollout_dataset, [0.5, 0.3, 0.2])
-    training_dataset = RolloutDataset(
-        "from",
-        episodes=[
-            rollout_dataset.episodes_paths[idx] for idx in train_episodes.indices
-        ],
-    )
-    test_dataset = RolloutDataset(
-        "from",
-        episodes=[rollout_dataset.episodes_paths[idx] for idx in test_episodes.indices],
-    )
-    val_dataset = RolloutDataset(
-        "from",
-        episodes=[rollout_dataset.episodes_paths[idx] for idx in val_episodes.indices],
-    )
-    train_dataloader = RolloutDataloader(training_dataset, batch_size)
+    train_dataset = RolloutDataset.from_subset(train_episodes)
+    test_dataset = RolloutDataset.from_subset(test_episodes)
+    val_dataset = RolloutDataset.from_subset(val_episodes)
+    train_dataloader = RolloutDataloader(train_dataset, batch_size)
     test_dataloader = RolloutDataloader(test_dataset, batch_size)
     val_dataloader = RolloutDataloader(val_dataset, batch_size)
     vision = ConvVAE().to(DEVICE)
-    vision_trainer = VisionTrainer()
+    vision_trainer = VisionTrainer(vision)
     vision_trainer.train(
-        vision=vision,
         train_dataloader=train_dataloader,
         test_dataloader=test_dataloader,
         val_dataloader=val_dataloader,
@@ -213,12 +194,12 @@ def train_vision(
     create_vision_gif(episode, vision)
 
 
-def create_latent(continuos=True, num_rollouts: int = 10000, max_steps: int = 500):
-    rollout_dataset = RolloutDataset(
-        "load", num_rollouts, max_steps, continuos=continuos
-    )
-    vision = ConvVAE.from_pretrained(Path("models/vision.pt"))
-    LatentDataset(rollout_dataset=rollout_dataset, vision=vision, mode="create")
+def create_latent_dataset(
+    continuos=True, num_rollouts: int = 10000, max_steps: int = 500
+):
+    rollout_dataset = RolloutDataset(num_rollouts, max_steps, continuos=continuos)
+    vision = ConvVAE.from_pretrained(Path("models/vision/vision.pt"))
+    LatentDataset(rollout_dataset=rollout_dataset, vision=vision)
 
 
 def train_memory(
@@ -228,41 +209,29 @@ def train_memory(
     num_rollouts: int = 10000,
     max_steps: int = 500,
 ):
-    rollout_dataset = RolloutDataset(
-        "load", num_rollouts, max_steps, continuos=continuos
-    )
+    rollout_dataset = RolloutDataset(num_rollouts, max_steps, continuos=continuos)
     (
         train_episodes,
         test_episodes,
         val_episodes,
     ) = torch.utils.data.random_split(rollout_dataset, [0.5, 0.3, 0.2])
-    training_dataset = RolloutDataset(
-        "from",
-        episodes=[
-            rollout_dataset.episodes_paths[idx] for idx in train_episodes.indices
-        ],
-    )
-    test_dataset = RolloutDataset(
-        "from",
-        episodes=[rollout_dataset.episodes_paths[idx] for idx in test_episodes.indices],
-    )
-    val_dataset = RolloutDataset(
-        "from",
-        episodes=[rollout_dataset.episodes_paths[idx] for idx in val_episodes.indices],
-    )
-    vision = ConvVAE.from_pretrained().to(DEVICE)
-    latent_training_set = LatentDataset(training_dataset, vision)
+
+    train_dataset = RolloutDataset.from_subset(train_episodes)
+    test_dataset = RolloutDataset.from_subset(test_episodes)
+    val_dataset = RolloutDataset.from_subset(val_episodes)
+
+    vision = ConvVAE.from_pretrained(Path("models/vision/vision.pt")).to(DEVICE)
+    latent_training_set = LatentDataset(train_dataset, vision)
     latent_test_set = LatentDataset(test_dataset, vision)
     latent_val_set = LatentDataset(val_dataset, vision)
 
-    train_dataloader = LatentDataloader(latent_training_set, 64)
-    test_dataloader = LatentDataloader(latent_test_set, 64)
-    val_dataloader = LatentDataloader(latent_val_set, 64)
+    train_dataloader = LatentDataloader(latent_training_set, batch_size)
+    test_dataloader = LatentDataloader(latent_test_set, batch_size)
+    val_dataloader = LatentDataloader(latent_val_set, batch_size)
 
     memory = MDN_RNN(continuos=continuos).to(DEVICE)
-    memory_trainer = MemoryTrainer()
+    memory_trainer = MemoryTrainer(memory)
     memory_trainer.train(
-        memory=memory,
         train_dataloader=train_dataloader,
         test_dataloader=test_dataloader,
         val_dataloader=val_dataloader,
@@ -277,17 +246,15 @@ def train_controller(
     popuation_size=32,
     max_iterations=16,
     continuos=True,
-    num_rollouts: int = 10000,
-    max_steps: int = 500,
 ):
-    RolloutDataset("create", num_rollouts, max_steps, continuos=continuos)
+
     vision = ConvVAE.from_pretrained().to(DEVICE)
     memory = MDN_RNN.from_pretrained().to(DEVICE)
     controller = Controller(continuos=continuos)
     controller_trainer = ControllerTrainer(
         controller, vision, memory, population_size=popuation_size
     )
-    controller_trainer.train(3)
+    controller_trainer.train(max_iterations)
 
 
 def main():
@@ -315,7 +282,7 @@ def main():
         "train_vision", help="Train the vision model"
     )
     parser_train_vision.add_argument(
-        "--epochs", type=int, default=10, help="Number of training epochs"
+        "--epochs", type=int, default=1, help="Number of training epochs"
     )
     parser_train_vision.add_argument(
         "--batch_size", type=int, default=64, help="Number of training epochs"
@@ -332,7 +299,7 @@ def main():
 
     # Parser for create_latent
     parser_create_latent = subparsers.add_parser(
-        "create_latent", help="Create a latent dataset"
+        "create_latent_dataset", help="Create a latent dataset"
     )
     parser_create_latent.add_argument(
         "--continuos", type=bool, default=True, help="Whether the rollout is continuous"
@@ -377,12 +344,6 @@ def main():
     parser_train_controller.add_argument(
         "--continuos", type=bool, default=True, help="Whether the rollout is continuous"
     )
-    parser_train_controller.add_argument(
-        "--num_rollouts", type=int, default=10000, help="Number of rollouts"
-    )
-    parser_train_controller.add_argument(
-        "--max_steps", type=int, default=500, help="Maximum steps per rollout"
-    )
 
     args = parser.parse_args()
 
@@ -397,8 +358,8 @@ def main():
             args.num_rollouts,
             args.max_steps,
         )
-    elif args.command == "create_latent":
-        create_latent(args.continuos, args.num_rollouts, args.max_steps)
+    elif args.command == "create_latent_dataset":
+        create_latent_dataset(args.continuos, args.num_rollouts, args.max_steps)
     elif args.command == "train_memory":
         train_memory(
             args.epochs,
@@ -412,8 +373,6 @@ def main():
             args.population_size,
             args.max_iterations,
             args.continuos,
-            args.num_rollouts,
-            args.max_steps,
         )
     else:
         parser.print_help()

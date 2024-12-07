@@ -33,11 +33,6 @@ class Controller(nn.Module):
             self.fc(torch.cat((latent_observation, hidden_state), dim=-1))
         )
 
-    def __call__(
-        self, latent_observation: torch.Tensor, hidden_state: torch.Tensor
-    ) -> torch.Tensor:
-        return self.forward(latent_observation, hidden_state)
-
     # def act(self, observation: np.ndarray, vision: ConvVAE, memory: MDN_RNN):
     #     observation = transforms.Compose(
     #         [
@@ -83,13 +78,13 @@ class ControllerTrainer:
         controller: Controller,
         vision: ConvVAE,
         memory: MDN_RNN,
-        population_size=4,
+        population_size=16,
         env_name="CarRacing-v2",
         render=False,
     ):
         self.controller = controller
-        self.vision = vision.eval()
-        self.memory = memory.eval()
+        self.vision = vision.to("cpu").eval()
+        self.memory = memory.to("cpu").eval()
         self.population_size = population_size
         self.env_name = env_name
         self.n_rows, self.n_cols = self._get_rows_and_cols()
@@ -114,7 +109,7 @@ class ControllerTrainer:
             n_cols = math.ceil(self.population_size / n_rows)
         return n_rows, n_cols
 
-    def _rollout(self, index: int):
+    def _rollout(self, _index: int):
         environment = gym.make(self.env_name, render_mode="rgb_array")
         observation, _ = environment.reset()
         hidden_state, cell_state = self.memory.init_hidden()
@@ -162,7 +157,7 @@ class ControllerTrainer:
             return images
 
         max_frames = max(len(frames) for frames in all_frames)
-        anim = FuncAnimation(fig, update, frames=max_frames, interval=50, blit=True)
+        _anim = FuncAnimation(fig, update, frames=max_frames, interval=50, blit=True)
         plt.show()
 
     def train(
@@ -181,7 +176,7 @@ class ControllerTrainer:
                 loaded_data = torch.load(last_checkpoint_path, weight_only=True)
                 self.controller.load_state_dict(loaded_data)
                 initial_epoch = int(last_checkpoint_path.stem.split("_")[-1])
-        save_path.parent.mkdir(parents=True, exist_ok=True)
+        save_path.mkdir(parents=True, exist_ok=True)
         initial_solution = self.controller.get_weights()
         print(f"Initial solution size: {len(initial_solution)}")
         solver = CMAEvolutionStrategy(
@@ -208,22 +203,13 @@ class ControllerTrainer:
             fitlist = [result[1] for result in results]
             solver.tell(solutions, fitlist)
             bestsol, bestfit, *_ = solver.result
-            print(f"Best fitness in epoch {epoch}: {bestfit}")
+            print()
+            print(f"\tBest fitness in epoch {epoch}: {bestfit}")
             if bestfit > 900:
-                print(f"Best solution found : {bestfit}")
+                print("\tBest solution found")
                 break
 
         self.controller.set_weights(bestsol)
         save_path.parent.mkdir(parents=True, exist_ok=True)
         torch.save(self.controller.state_dict(), save_path)
         print(f"Model saved to {save_path}")
-
-
-if __name__ == "__main__":
-    vision = ConvVAE.from_pretrained().to("cpu")
-    memory = MDN_RNN.from_pretrained().to("cpu")
-    controller = Controller().to("cpu")
-    controller_trainer = ControllerTrainer(
-        controller, vision, memory, population_size=11
-    )
-    controller_trainer.train(3)

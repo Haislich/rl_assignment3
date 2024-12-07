@@ -2,13 +2,14 @@
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Iterable, Iterator, List, Literal, Tuple
+from typing import Any, Callable, Iterable, Iterator, List, Tuple
 
 import torch
 from torch.utils.data import DataLoader, Dataset
 from torch.utils.data.sampler import Sampler
-
+from tqdm import tqdm
 from rollout_dataset import Episode, RolloutDataset
+
 from vision import ConvVAE
 
 
@@ -19,14 +20,26 @@ class LatentEpisode:
     rewards: torch.Tensor
 
     @staticmethod
-    def from_episode(episode: Episode, vision: ConvVAE):
-        device = next(vision.parameters()).device
-        latent_observations = vision.get_latent(episode.observations.to(device))
-        return LatentEpisode(
-            latent_observations=latent_observations,
-            actions=episode.actions,
-            rewards=episode.rewards,
-        )
+    def from_episode_path(episode_path: Path, vision: ConvVAE):
+        latent_episode = None
+        try:
+            episode = Episode.load(episode_path)
+            device = next(vision.parameters()).device
+            latent_observations = vision.get_latent(episode.observations.to(device))
+            latent_episode = LatentEpisode(
+                latent_observations=latent_observations,
+                actions=episode.actions,
+                rewards=episode.rewards,
+            )
+        except FileNotFoundError:
+            print(f"Episode {episode_path} hasn't been found, it will be skipped")
+        except Exception as e:  # type:ignore
+            print(
+                f"Some unknown exception has happend with {episode_path}, it will be skipped"
+            )
+            print(f"\tException:{e}")
+
+        return latent_episode
 
     def save(self, latent_episode_path: Path):
         latent_episode_path.parent.mkdir(parents=True, exist_ok=True)
@@ -38,8 +51,6 @@ class LatentEpisode:
             },
             latent_episode_path,
         )
-        # Not clear if it can go into an exception,
-        # This return indicates that everything went fine.
         return latent_episode_path
 
     @staticmethod
@@ -61,54 +72,67 @@ class LatentDataset(Dataset):
         self,
         rollout_dataset: RolloutDataset,
         vision: ConvVAE,
-        mode: Literal[
-            "create",
-            "load",
-        ] = "load",  # Modes: "create", "load", or "from"
         root: Path = Path("./data/latents"),
     ):
         self.rollout_dataset = rollout_dataset
         if len(self.rollout_dataset) == 0:
             raise ValueError("Rollout Dataset must be non empty.")
-        self.vision = vision
-        self.root = root / ("continuos" if rollout_dataset.continuos else "discrete")
-        if mode == "create":
-            self.latent_episodes_paths = self._create_dataset()
-        elif mode == "load":
-            self.latent_episodes_paths = self._load_dataset()
-            if self.latent_episodes_paths == []:
-                print(
-                    f"Latent Dataset not found at {self.root}. Falling back to creation."
-                )
-                self.latent_episodes_paths = self._create_dataset()
-        else:
-            raise ValueError(
-                f"Invalid mode '{mode}'. Supported modes: 'create', 'load'."
-            )
+        self.vision = vision.eval()
+        self.root = (
+            root
+            / ("continuos" if rollout_dataset.continuos else "discrete")
+            / f"{rollout_dataset.max_steps}steps"
+        )
+        self.latent_episodes_paths = self._load_dataset()
+        self.latent_episodes_paths = self._create_dataset()
+        if self.latent_episodes_paths == []:
+            raise ValueError("The latent dataset cannot be empty")
 
     def _create_dataset(self):
-        return [
-            LatentEpisode.from_episode(Episode.load(episode_path), self.vision).save(
-                self.root / f"latent_episode_{idx}.pt",
-            )
-            for idx, episode_path in enumerate(self.rollout_dataset)
-        ]
+        existing_indices = {
+            int(path.stem.split("_")[-1]) for path in self.latent_episodes_paths
+        }
+        latent_episodes_paths = []
+        if len(self.rollout_dataset) - len(existing_indices) != 0:
+            for idx, episode_path in tqdm(
+                enumerate(self.rollout_dataset),
+                total=len(self.rollout_dataset) - len(existing_indices),
+                desc="Generating latent_dataset",
+            ):
+                if idx in existing_indices:
+                    continue
+
+                latent_episode = LatentEpisode.from_episode_path(
+                    episode_path, self.vision
+                )
+                if latent_episode is not None:
+
+                    latent_episodes_paths.append(
+                        latent_episode.save(self.root / f"latent_episode_{idx}.pt")
+                    )
+
+        return latent_episodes_paths + self.latent_episodes_paths
 
     def _load_dataset(self):
         if not self.root.exists():
             return []
-        latent_episode_paths = [
-            latent_episode_path
-            for latent_episode_path in sorted(self.root.glob("latent_episode_*"))
-        ]
-        return latent_episode_paths
+        latent_episodes_paths = sorted(self.root.glob("latent_episode_*"))
+        rollout_indices = {
+            int(path.stem.split("_")[-1])
+            for path in self.rollout_dataset.episodes_paths
+        }
+        latent_indices = {
+            int(path.stem.split("_")[-1]) for path in latent_episodes_paths
+        }
+        # missing_indices = rollout_indices - latent_indices
+        return latent_episodes_paths
 
     def __len__(self):
         return len(self.latent_episodes_paths)
 
-    def __getitem__(self, index):
+    def __getitem__(self, index) -> Path:
         latent_episode_path = self.latent_episodes_paths[index]
-        return LatentEpisode.load(latent_episode_path)
+        return latent_episode_path
 
     def __iter__(self):
         return iter(self.latent_episodes_paths)
@@ -117,7 +141,7 @@ class LatentDataset(Dataset):
 class LatentDataloader(DataLoader):
     def __init__(
         self,
-        dataset: Dataset,
+        dataset: LatentDataset,
         batch_size: int | None = 1,
         shuffle: bool | None = None,
         sampler: Sampler | Iterable | None = None,
@@ -156,15 +180,22 @@ class LatentDataloader(DataLoader):
 
     @staticmethod
     def __collate_fn(batch) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        batch_latent_observations = torch.stack(
-            [latent_episode.latent_observations for latent_episode in batch]
-        )
-        batch_actions = torch.stack(
-            [latent_episode.actions for latent_episode in batch]
-        )
-        batch_rewards = torch.stack(
-            [latent_episode.rewards for latent_episode in batch]
-        )
+        batch_latent_observations = []
+        batch_actions = []
+        batch_rewards = []
+        for latent_episode_path in batch:
+            try:
+                latent_episode = LatentEpisode.load(latent_episode_path)
+                batch_latent_observations.append(latent_episode.latent_observations)
+                batch_actions.append(latent_episode.actions)
+                batch_rewards.append(latent_episode.rewards)
+            except RuntimeError:
+                print(
+                    f"\t {latent_episode_path.name} seems corrupted, so it will be skipped."
+                )
+        batch_latent_observations = torch.stack(batch_latent_observations)
+        batch_actions = torch.stack(batch_actions)
+        batch_rewards = torch.stack(batch_rewards)
 
         return batch_latent_observations, batch_actions, batch_rewards
 

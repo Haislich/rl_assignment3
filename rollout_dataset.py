@@ -6,12 +6,12 @@ from functools import partial
 from multiprocessing import ProcessError
 import os
 from pathlib import Path
-from typing import Any, Callable, Iterable, Iterator, List, Literal, Optional, Tuple
+from typing import Any, Callable, Iterable, Iterator, List, Optional, Tuple
 
 import gymnasium as gym
 import numpy as np
 import torch
-from torch.utils.data import DataLoader, Dataset
+from torch.utils.data import DataLoader, Dataset, Subset
 from torch.utils.data.sampler import Sampler
 from torchvision import transforms
 from tqdm import tqdm
@@ -52,16 +52,10 @@ class Episode:
 class RolloutDataset(Dataset):
     def __init__(
         self,
-        mode: Literal[
-            "create",
-            "load",
-            "from",
-        ] = "load",  # Modes: "create", "load", or "from"
         num_rollouts: int = 1,
         max_steps: int = 1,
         continuos: bool = True,
         env_name: str = "CarRacing-v2",
-        episodes: Optional[List[Path]] = None,
         root: Path = Path("./data/rollouts"),
     ):
         self.num_rollouts = num_rollouts
@@ -80,26 +74,9 @@ class RolloutDataset(Dataset):
         )
         self.episodes_paths = self._load_dataset()
 
-        if mode == "load":
-            if len(self.episodes_paths) < num_rollouts:
-                print(
-                    f"Complete dataset not found at {self.root}. Creating the missing ones."
-                )
-                self.episodes_paths = self._create_dataset()
-        elif mode == "create":
-            if len(self.episodes_paths) > 0:
-                print(f"Already found {len(self.episodes_paths)} episodes.")
-            if len(self.episodes_paths) < num_rollouts:
-                self.episodes_paths = self._create_dataset()
-            print(f"Created dataset with {len(self.episodes_paths)} episodes.")
-        elif mode == "from":
-            if episodes is None:
-                raise ValueError("'episodes' must be provided when mode is 'from'")
-            self.episodes_paths = episodes
-        else:
-            raise ValueError(
-                f"Invalid mode '{mode}'. Supported modes: 'create', 'load', 'from'."
-            )
+        if len(self.episodes_paths) < num_rollouts:
+            self.episodes_paths = self._create_dataset()
+
         if self.episodes_paths == []:
             raise ValueError("Cannot create a RolloutDataset without episodes.")
         self.episodes_paths = [
@@ -108,6 +85,22 @@ class RolloutDataset(Dataset):
             if episode_path.exists()
         ]
         self._reestablish_episode_ordering()
+
+    @staticmethod
+    def from_subset(subset: Subset):
+        old_rollout_dataset = subset.dataset
+        indices = subset.indices
+        new_episodes_paths = np.array(
+            old_rollout_dataset.episodes_paths  # type:ignore
+        )[indices].tolist()
+        new_rollout_dataset = RolloutDataset(
+            num_rollouts=old_rollout_dataset.num_rollouts,  # type:ignore
+            max_steps=old_rollout_dataset.max_steps,  # type:ignore
+            continuos=old_rollout_dataset.continuos,  # type: ignore
+            env_name=old_rollout_dataset.env_name,  # type: ignore
+        )
+        new_rollout_dataset.episodes_paths = new_episodes_paths
+        return new_rollout_dataset
 
     def _reestablish_episode_ordering(self):
         """Reestablish correct episode numbering."""
@@ -164,42 +157,37 @@ class RolloutDataset(Dataset):
         return action, recent_acceleration
 
     def _execute_single_rollout(self, max_steps: int, index: int = 0) -> Optional[Path]:
-        try:
-            observations, actions, rewards = [], [], []
-            env = gym.make(
-                id=self.env_name,
-                continuous=self.continuos,
-            )
 
-            observation, _ = env.reset()
-            recent_acceleration = False
-            for _ in range(max_steps):
-                action, recent_acceleration = self._sampling_strategy(
-                    recent_acceleration
-                )
-                next_observation, reward, done, _, _ = env.step(action)
-                observation = self.__transformation(observation)
-                observations.append(observation)
-                action = torch.from_numpy(action)
-                actions.append(action)
-                reward = torch.tensor(reward)
-                rewards.append(reward)
-                observation = next_observation
-                if done:
-                    break
-            observations = torch.stack(observations)
-            actions = torch.stack(actions).to(dtype=torch.float32)
-            rewards = torch.stack(rewards).to(dtype=torch.float32)
-            episode = Episode(
-                observations=observations, actions=actions, rewards=rewards
-            )
-            if observations.shape[0] != max_steps:
-                return
+        observations, actions, rewards = [], [], []
+        env = gym.make(
+            id=self.env_name,
+            continuous=self.continuos,
+        )
+        observation, _ = env.reset()
+        recent_acceleration = False
+        for _ in range(max_steps):
+            action, recent_acceleration = self._sampling_strategy(recent_acceleration)
+            next_observation, reward, done, _, _ = env.step(action)
+            observation = self.__transformation(observation)
+            observations.append(observation)
+            action = torch.from_numpy(action)
+            actions.append(action)
+            reward = torch.tensor(reward)
+            rewards.append(reward)
+            observation = next_observation
+            if done:
+                break
+        observations = torch.stack(observations)
+        actions = torch.stack(actions).to(dtype=torch.float32)
+        rewards = torch.stack(rewards).to(dtype=torch.float32)
+        episode = Episode(observations=observations, actions=actions, rewards=rewards)
+        if observations.shape[0] != max_steps:
+            return
+        try:
             return episode.save(self.root / f"episode_{index}.pt")
         except ProcessError as e:
             print(e)
-        except Exception as e:
-            print(e.__cause__)
+            return
 
     def _collect_and_filter_episodes(
         self, num_rollouts: int, max_steps: int
@@ -229,7 +217,7 @@ class RolloutDataset(Dataset):
     def __len__(self):
         return len(self.episodes_paths)
 
-    def __iter__(self):
+    def __iter__(self) -> Iterator[Path]:
         return iter(self.episodes_paths)
 
 
@@ -237,7 +225,7 @@ class RolloutDataloader(DataLoader):
     def __init__(
         self,
         dataset: Dataset,
-        batch_size: int | None = 1,
+        batch_size: int = 1,
         shuffle: bool | None = None,
         sampler: Sampler | Iterable | None = None,
         batch_sampler: Sampler[List] | Iterable[List] | None = None,
@@ -279,10 +267,13 @@ class RolloutDataloader(DataLoader):
         batch_actions = []
         batch_rewards = []
         for episode_path in batch:
-            episode = Episode.load(episode_path)
-            batch_observations.append(episode.observations)
-            batch_actions.append(episode.observations)
-            batch_rewards.append(episode.observations)
+            try:
+                episode = Episode.load(episode_path)
+                batch_observations.append(episode.observations)
+                batch_actions.append(episode.actions)
+                batch_rewards.append(episode.rewards)
+            except RuntimeError:
+                print(f"\t {episode_path.name} seems corrupted, so it will be skipped.")
         batch_observations = torch.stack(batch_observations)
         batch_actions = torch.stack(batch_actions)
         batch_rewards = torch.stack(batch_rewards)
@@ -296,7 +287,3 @@ class RolloutDataloader(DataLoader):
         self,
     ) -> Iterator[Tuple[torch.Tensor, torch.Tensor, torch.Tensor]]:
         yield from super().__iter__()
-
-
-# rollout_dataset = RolloutDataset("create", 10, 30, continuos=True)
-# episode = rollout_dataset[0]
