@@ -156,11 +156,14 @@ def create_memory_gif(
 
 
 class Policy(nn.Module):
+    continuous = True
 
-    def __init__(self, device=torch.device("cpu"), continuous=True):
+    def __init__(
+        self,
+        device=torch.device("cpu"),
+    ):
         super(Policy, self).__init__()
         self.device = device
-        self.continuous = continuous
         self.vision = ConvVAE().to(device)
         self.memory = MDN_RNN().to(device)
         self.controller = Controller().to("cpu")
@@ -196,10 +199,10 @@ class Policy(nn.Module):
         max_steps=1000,
         vision_batch_size=64,
         vision_epochs=0,
-        memory_batch_size=32,
-        memory_epochs=20,
+        memory_batch_size=128,
+        memory_epochs=10,
         controller_epochs=50,
-        controller_max_steps=500,
+        controller_max_steps=200,
         population_size=16,
     ):
         rollout_dataset = RolloutDataset(
