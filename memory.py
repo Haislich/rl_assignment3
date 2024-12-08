@@ -76,11 +76,11 @@ class MDN_RNN(nn.Module):
             batch_size, seq_len, self.num_mixtures, self.latent_dimension
         )
         target = target.unsqueeze(2).expand(-1, -1, self.num_mixtures, -1)
-        sigma = torch.clamp(sigma, min=1e-4)
+        sigma = torch.clamp(sigma, min=1e-8)
 
         normal = torch.distributions.Normal(loc=mu, scale=sigma)
         log_probs = normal.log_prob(target).sum(dim=-1)
-        log_pi = torch.log(pi + 1e-4)
+        log_pi = torch.log(pi + 1e-8)
         log_probs = -torch.logsumexp(log_pi + log_probs, dim=-1)
         return log_probs.mean()
 
@@ -163,33 +163,33 @@ class MemoryTrainer:
     ) -> float:
         self.memory.eval()
         test_loss = 0
-
-        for (
-            batch_latent_episodes_observations,
-            batch_latent_episodes_actions,
-            _,
-        ) in tqdm(
-            test_dataloader,
-            total=ceil(
-                len(test_dataloader) / test_dataloader.batch_size  # type:ignore
-            ),
-            desc="Testing on latent episode batches",
-            leave=False,
-        ):
-            batch_latent_episodes_observations = batch_latent_episodes_observations.to(
-                self.device
-            )
-            batch_latent_episodes_actions = batch_latent_episodes_actions.to(
-                self.device
-            )
-            target = batch_latent_episodes_observations[:, 1:, :]
-            pi, mu, sigma, *_ = self.memory.forward(
-                batch_latent_episodes_observations[:, :-1],
-                batch_latent_episodes_actions[:, :-1],
-            )
-            loss = self.memory.loss(pi, mu, sigma, target)
-            test_loss += loss.item()
-        test_loss /= len(test_dataloader)
+        with torch.inference_mode():
+            for (
+                batch_latent_episodes_observations,
+                batch_latent_episodes_actions,
+                _,
+            ) in tqdm(
+                test_dataloader,
+                total=ceil(
+                    len(test_dataloader) / test_dataloader.batch_size  # type:ignore
+                ),
+                desc="Testing on latent episode batches",
+                leave=False,
+            ):
+                batch_latent_episodes_observations = (
+                    batch_latent_episodes_observations.to(self.device)
+                )
+                batch_latent_episodes_actions = batch_latent_episodes_actions.to(
+                    self.device
+                )
+                target = batch_latent_episodes_observations[:, 1:, :]
+                pi, mu, sigma, *_ = self.memory.forward(
+                    batch_latent_episodes_observations[:, :-1],
+                    batch_latent_episodes_actions[:, :-1],
+                )
+                loss = self.memory.loss(pi, mu, sigma, target)
+                test_loss += loss.item()
+            test_loss /= len(test_dataloader)
         return test_loss
 
     def train(
@@ -216,7 +216,6 @@ class MemoryTrainer:
             total=epochs,
             desc="Training Memory",
         ):
-            print(f"Epoch {epoch + 1}/{epochs}")
             train_loss = self._train_step(
                 train_dataloader,
                 optimizer,
@@ -226,8 +225,8 @@ class MemoryTrainer:
             # Log to TensorBoard
             writer.add_scalar("Loss/Train", train_loss, epoch)
             writer.add_scalar("Loss/Test", test_loss, epoch)
-            print()
-            print(
+
+            tqdm.write(
                 f"\tEpoch {epoch + 1}/{epochs+initial_epoch} | "
                 f"Train Loss: {train_loss:.5f} | "
                 f"Test Loss: {test_loss:.5f}"

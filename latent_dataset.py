@@ -106,8 +106,6 @@ class LatentDataset(Dataset):
                 missing_episodes.append(
                     (missing_episode_path, missing_latent_episode_path)
                 )
-        # print(len(total_indices), len(current_indices), len(missing_episodes))
-        # exit()
         latent_episodes_paths = []
         if missing_episodes:
             for missing_episode_path, missing_latent_episode_path in tqdm(

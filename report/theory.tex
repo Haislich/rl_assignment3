@@ -1,0 +1,157 @@
+\chapter*{Theory}
+
+\section*{Exercise 1}
+
+We are given the following Q table:
+
+\[
+    Q(s,a) = 
+    \begin{pmatrix}
+        1 & 2   \\
+        3 & 4 
+    \end{pmatrix} =
+    \begin{pmatrix}
+        Q(1,1) & Q(1,2)   \\
+        Q(2,1) & Q(2,2) 
+    \end{pmatrix}
+\]
+
+Additionally, the parameters are $\alpha = 0.2$, $\gamma = 0.7$, and the experience $(s=2, a=2, r=5, s'=1)$.
+
+For Q-Learning, the update rule is:
+
+\[
+    Q(s,a) \leftarrow Q(s,a) + \alpha \big[ r + \gamma \max_a Q(s',a) - Q(s,a) \big]
+\]
+
+Substituting the values from the problem:
+
+\[
+    Q(2,2) \leftarrow 4 + 0.2 \big[ 5 + 0.7 \cdot \underline{2} - 4 \big]
+\]
+
+Here, the underlined \(2\) corresponds to $\max_a Q(1,a)$, which is the maximum value in the first row of the Q table. The updated Q table becomes:
+
+\[
+    Q(s,a) = 
+    \begin{pmatrix}
+        1 & 2     \\
+        3 & 4.48
+    \end{pmatrix}
+\]
+
+For SARSA, the update rule is:
+
+\[
+    Q(s,a) \leftarrow Q(s,a) + \alpha \big[ r + \gamma Q(s',a') - Q(s,a) \big]
+\]
+
+Given that $a' = 1$, substituting the values:
+
+\[
+    Q(2,2) \leftarrow 4 + 0.2 \big[ 5 + 0.7 \cdot 1 - 4 \big]
+\]
+
+The updated Q table is:
+
+\[
+    Q(s,a) = 
+    \begin{pmatrix}
+        1 & 2     \\
+        3 & 4.34
+    \end{pmatrix}
+\]
+
+\subsection*{Resources}
+
+\begin{itemize}
+    \item Slides: 08 - Q-Learning, SARSA
+\end{itemize}
+
+\section*{Exercise 2}
+
+LQR is a control design method for optimal control in systems of the form:
+
+\[
+    x_{t+1} = A x_t + B u_t
+\]
+
+Here, $x$ and $u$ represent the state and input variables, which in our context correspond to $s \equiv x$ and $a \equiv u$. The goal is to optimize a quadratic cost function:
+
+\[
+    c(x_t, u_t) = x_t^\top Q x_t + u_t^\top R u_t
+\]
+
+However, real-world systems rarely satisfy the assumption of linear dynamics or a purely quadratic cost function. In our case, the dynamics are non-linear, and the cost function is not quadratic.
+
+The linearization of the dynamics begins by assuming access to a nominal trajectory $\{(x_t^*, u_t^*)\}$, which serves as the equilibrium point for local linearization:
+
+\[
+    x_{t+1} \approx f(x_t^*, u_t^*) + \frac{\partial f}{\partial x} \bigg|_{(x_t^*, u_t^*)} (x_t - x_t^*) + \frac{\partial f}{\partial u} \bigg|_{(x_t^*, u_t^*)} (u_t - u_t^*)
+\]
+
+Rearranging and renaming terms:
+
+\[
+    x_{t+1} = f(x_t^*, u_t^*) - x^*_{t+1} + A_t \Delta x_t + B_t \Delta u_t
+\]
+
+where $A_t$ and $B_t$ are:
+
+\[
+    A_t = \frac{\partial f}{\partial x} \bigg|_{(x_t^*, u_t^*)}, \quad B_t = \frac{\partial f}{\partial u} \bigg|_{(x_t^*, u_t^*)}
+\]
+
+The residual error term  $m_t = f(x_t^*, u_t^*) - x^*_{t+1}$ is used to account for discrepancies between the nominal trajectory and actual dynamics (can be thought of as distrubances):
+
+\[
+    \Delta x_{t+1} = A_t \Delta x_t + B_t \Delta u_t + m_t
+\]
+
+This residual $m_t$ ensures that the model does not incorrectly assume the nominal trajectory satisfies the true dynamics, avoiding suboptimal control.
+
+For the cost function, a second-order Taylor expansion ensures its quadratic form:
+
+\[
+    c(x_t, u_t) \approx c(x_t^*, u_t^*) + \frac{\partial c}{\partial x} \bigg|_{(x_t^*, u_t^*)} (x_t - x_t^*) + \frac{\partial c}{\partial u} \bigg|_{(x_t^*, u_t^*)} (u_t - u_t^*)
+\]
+\[
+    + \frac{1}{2} (x_t - x_t^*)^\top \frac{\partial^2 c}{\partial x^2} \bigg|_{(x_t^*, u_t^*)} (x_t - x_t^*) + \frac{1}{2} (u_t - u_t^*)^\top \frac{\partial^2 c}{\partial u^2} \bigg|_{(x_t^*, u_t^*)} (u_t - u_t^*)
+\]
+\[
+    + (x_t - x_t^*)^\top \frac{\partial^2 c}{\partial x \partial u} \bigg|_{(x_t^*, u_t^*)} (u_t - u_t^*)
+\]
+
+After rearranging and simplifying terms:
+
+\[
+    c(x_t, u_t) = \dots + \frac{1}{2} (x_t - x_t^*)^\top Q_t (x_t - x_t^*) + \frac{1}{2} (u_t - u_t^*)^\top R_t (u_t - u_t^*)
+\]
+
+where:
+
+\[
+    Q_t = \frac{\partial^2 c}{\partial x^2} \bigg|_{(x_t^*, u_t^*)}, \quad R_t = \frac{\partial^2 c}{\partial u^2} \bigg|_{(x_t^*, u_t^*)}
+\]
+
+This formulation enables the use of LQR, though care must be taken with linear terms in the cost function (the terms omitted with the use of the dots), which may require iterative LQR (iLQR) for optimal handling. A potential solution involves a change of coordinates, as discussed in `Optimal Control for Linear Dynamical Systems and Quadratic Cost` (see Resources, page 26). However, I think that the details of this approach are beyond the scope of this exercise.
+
+\begin{itemize}
+    \item $A_t = \frac{\partial f}{\partial x} \bigg|_{(x_t^*, u_t^*)}$
+    \item $B_t = \frac{\partial f}{\partial u} \bigg|_{(x_t^*, u_t^*)}$
+    \item $Q_t = \frac{\partial^2 c}{\partial x^2} \bigg|_{(x_t^*, u_t^*)}$
+    \item $R_t = \frac{\partial^2 c}{\partial u^2} \bigg|_{(x_t^*, u_t^*)}$
+\end{itemize}
+
+
+\subsection*{Resources}
+
+\begin{itemize}
+    \item Slides: 06 - LQR, iLQR, MPC
+    \item \href{http://www.diag.uniroma1.it/~oriolo/amr/slides/WheeledMobileRobots4_Slides.pdf}{Motion Control: Introduction
+              and Trajectory Tracking} page 8 approximate linearization brush-up
+    \item \href{https://www.youtube.com/watch?v=S5LavPCJ5vw}{Lecture 5 LQR -- CS287-FA19 Advanced Robotics at UC Berkeley}
+    \item \href{https://rexlab.ri.cmu.edu/papers/iLQR_Tutorial.pdf}{iLQR tutorial}
+    \item \href{https://lucasjanson.fas.harvard.edu/courses/6a.pdf}{page 43, the derivation is the same as mine}
+    \item \href{https://people.eecs.berkeley.edu/~pabbeel/cs287-fa12/slides/LQR.pdf}{Optimal Control for Linear Dynamical Systems and Quadratic Cost}
+\end{itemize}

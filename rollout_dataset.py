@@ -134,7 +134,7 @@ class RolloutDataset(Dataset):
                 self.root.glob("episode_*"), key=lambda p: int(p.stem.split("_")[-1])
             )
         ]
-        return episode_paths
+        return episode_paths[: min(self.num_rollouts, len(episode_paths))]
 
     def _sampling_strategy(self, recent_acceleration: bool):
         if self.continuous:
