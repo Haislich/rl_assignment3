@@ -128,37 +128,42 @@ class ControllerTrainer:
         plt.show()
 
     def _rollout(self, args):
-        worker, max_steps = args
+        worker, max_steps, hidden_state, cell_state = args
         environment = self.environments[worker]
         observation, _ = environment.reset()
-        hidden_state, cell_state = self.memory.init_hidden()
+        controller = self.controllers[worker]
         cumulative_reward = 0
         progress_bar = tqdm(
             range(max_steps),
             desc=f"Worker {worker}: Reward {cumulative_reward:.2f}",
             leave=False,
         )
-        with torch.inference_mode():
-            for _ in progress_bar:
-                observation: torch.Tensor = self.__transformation(observation)
-                latent_observation = self.vision.get_latent(observation.unsqueeze(0))
-                latent_observation = latent_observation.unsqueeze(0)
-                action = self.controller(latent_observation, hidden_state)
-                numpy_action = action.detach().cpu().numpy().ravel()
-                next_observation, reward, done, _, _ = environment.step(numpy_action)
-                cumulative_reward += float(reward)
-                if done:
-                    break
-                _mu, _pi, _sigma, hidden_state, cell_state = self.memory.forward(
-                    latent_observation,
-                    action,
-                    hidden_state,
-                    cell_state,
-                )
-                observation = next_observation
-                progress_bar.set_description(
-                    f"Worker {worker}: Reward {cumulative_reward:.2f}"
-                )
+        for _ in progress_bar:
+            observation = self.__transformation(observation)
+            latent_observation = self.vision.get_latent(observation.unsqueeze(0))
+            latent_observation = latent_observation.unsqueeze(0)
+            action = controller(latent_observation, hidden_state)
+            numpy_action = action.detach().cpu().numpy().ravel()
+            next_observation, reward, done, _, _ = environment.step(numpy_action)
+            cumulative_reward += float(reward)
+            if done:
+                break
+            _mu, _pi, _sigma, hidden_state, cell_state = self.memory.forward(
+                latent_observation,
+                action,
+                hidden_state,
+                cell_state,
+            )
+            # Try to avoid memory leaks
+            observation = None
+            latent_observation = None
+            action = None
+            numpy_action = None
+
+            observation = next_observation
+            progress_bar.set_description(
+                f"Worker {worker}: Reward {cumulative_reward:.2f}"
+            )
         return cumulative_reward
 
     def train(
@@ -178,22 +183,24 @@ class ControllerTrainer:
             initial_epoch = controller_metadata["epoch"]
             self.controller.load_state_dict(controller_metadata["model_state"])
             bestfit = controller_metadata.get("best_fitness", bestfit)
-            bestsol = controller_metadata.get("best_solution", None)
+            bestsol = self.controller.get_weights()
 
         # Initialize CMA-ES
         initial_solution = self.controller.get_weights()
         solver = CMAEvolutionStrategy(
-            initial_solution, 0.5, {"popsize": self.population_size}
+            initial_solution, 0.1, {"popsize": self.population_size}
         )
-
-        for epoch in tqdm(
+        progress_bar = tqdm(
             range(initial_epoch, max_epochs + initial_epoch),
             total=max_epochs,
-            desc="Calculating solutions with CMAES",
+            desc=f"Calculating solutions with CMAES, {bestfit=}",
             leave=False,
-        ):
+        )
+        for epoch in progress_bar:
             solutions = solver.ask()
-
+            for controller, solution in zip(self.controllers, solutions):
+                controller.set_weights(solution)
+            hidden_state, cell_state = self.memory.init_hidden()
             # Parallel rollout evaluation
             with ThreadPoolExecutor(max_workers=self.population_size) as executor:
                 fitlist = list(
@@ -202,20 +209,17 @@ class ControllerTrainer:
                         zip(
                             range(self.population_size),
                             [max_steps] * self.population_size,
+                            [hidden_state] * self.population_size,
+                            [cell_state] * self.population_size,
                         ),
                     )
                 )
+                executor.shutdown()
 
-            # CMA-ES fitness adjustment
             fitlist = [-fitness for fitness in fitlist]
             solver.tell(solutions, fitlist)
             epoch_bestsol, epoch_bestfit, *_ = solver.result
             epoch_bestfit = -epoch_bestfit
-            tqdm.write(
-                f"Epoch {epoch}: "
-                + f"Best Fitness: {epoch_bestfit}, "
-                + f"Fitness Range: [{-max(fitlist)}, {-min(fitlist)}]"
-            )
 
             # Update best solution and controller only if fitness improves
             if epoch_bestfit > bestfit:
@@ -229,10 +233,13 @@ class ControllerTrainer:
                         "epoch": epoch + 1,
                         "model_state": self.controller.state_dict(),
                         "best_fitness": bestfit,
-                        "best_solution": bestsol,
                     },
                     save_path,
                 )
+
+            progress_bar.set_description(
+                f"Calculating solutions with CMAES, {bestfit=}"
+            )
 
         print(f"Training complete. Best fitness: {bestfit}")
         print(f"Model saved to {save_path}")

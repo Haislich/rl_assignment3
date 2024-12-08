@@ -196,9 +196,10 @@ class Policy(nn.Module):
         max_steps=1000,
         vision_batch_size=64,
         vision_epochs=0,
-        memory_batch_size=256,
+        memory_batch_size=32,
         memory_epochs=20,
-        controller_epochs=32,
+        controller_epochs=50,
+        controller_max_steps=500,
         population_size=16,
     ):
         rollout_dataset = RolloutDataset(
@@ -274,13 +275,10 @@ class Policy(nn.Module):
                     Path(f"media/memory/memory_vision_reconstruction_{idx}.gif"),
                 )
 
-        # create_memory_gif(episode, self.vision, self.memory, self.device)
-
         controller_trainer = ControllerTrainer(
             self.controller, self.vision, self.memory, population_size=population_size
         )
-        controller_trainer.train(controller_epochs, max_steps)
-        return
+        controller_trainer.train(controller_epochs, controller_max_steps)
 
     def save(self):
         pass

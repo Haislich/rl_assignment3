@@ -92,7 +92,7 @@ class MDN_RNN(nn.Module):
         mu = mu.view(batch_size, self.latent_dimension, self.num_mixtures)
         sigma = sigma.view(batch_size, self.latent_dimension, self.num_mixtures)
         categorical = torch.distributions.Categorical(pi)
-        mixture_indices = categorical.sample()  # Shape: (batch_size,)
+        mixture_indices = categorical.sample()
         mixture_indices = mixture_indices.unsqueeze(1).expand(-1, self.latent_dimension)
 
         selected_mu = torch.gather(mu, 2, mixture_indices.unsqueeze(-1)).squeeze(-1)
@@ -136,6 +136,7 @@ class MemoryTrainer:
                 len(train_dataloader) / train_dataloader.batch_size  # type:ignore
             ),
             desc="Processing latent episode batches",
+            leave=False,
         ):
             batch_latent_episodes_observations = batch_latent_episodes_observations.to(
                 self.device
@@ -182,6 +183,7 @@ class MemoryTrainer:
                 batch_latent_episodes_actions = batch_latent_episodes_actions.to(
                     self.device
                 )
+
                 target = batch_latent_episodes_observations[:, 1:, :]
                 pi, mu, sigma, *_ = self.memory.forward(
                     batch_latent_episodes_observations[:, :-1],
@@ -215,12 +217,13 @@ class MemoryTrainer:
             range(initial_epoch, epochs + initial_epoch),
             total=epochs,
             desc="Training Memory",
+            leave=False,
         ):
             train_loss = self._train_step(
                 train_dataloader,
                 optimizer,
             )
-            test_loss = self._test_step(test_dataloader)
+            test_loss = 0  # self._test_step(test_dataloader)
 
             # Log to TensorBoard
             writer.add_scalar("Loss/Train", train_loss, epoch)
@@ -239,7 +242,7 @@ class MemoryTrainer:
                 },
                 save_path,
             )
-        if val_dataloader is not None:
-            val_loss = self._test_step(test_dataloader)
-            print(f"Validation Loss: {val_loss:.5f}")
+        # if val_dataloader is not None:
+        #     val_loss = self._test_step(test_dataloader)
+        #     print(f"Validation Loss: {val_loss:.5f}")
         print(f"Model saved to {save_path}")
