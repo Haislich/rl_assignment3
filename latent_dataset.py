@@ -80,7 +80,7 @@ class LatentDataset(Dataset):
         self.vision = vision.eval()
         self.root = (
             root
-            / ("continuos" if rollout_dataset.continuos else "discrete")
+            / ("continuous" if rollout_dataset.continuous else "discrete")
             / f"{rollout_dataset.max_steps}steps"
         )
         self.latent_episodes_paths = self._load_dataset()
@@ -89,42 +89,51 @@ class LatentDataset(Dataset):
             raise ValueError("The latent dataset cannot be empty")
 
     def _create_dataset(self):
-        existing_indices = {
+        self.root.mkdir(parents=True, exist_ok=True)
+        total_indices = {
+            int(path.stem.split("_")[-1])
+            for path in self.rollout_dataset.episodes_paths
+        }
+        current_indices = {
             int(path.stem.split("_")[-1]) for path in self.latent_episodes_paths
         }
+        missing_indices = total_indices - current_indices
+        missing_episodes = []
+        for index in missing_indices:
+            missing_episode_path = self.rollout_dataset.root / f"episode_{index}.pt"
+            missing_latent_episode_path = self.root / f"latent_episode_{index}.pt"
+            if missing_episode_path.exists():
+                missing_episodes.append(
+                    (missing_episode_path, missing_latent_episode_path)
+                )
+        # print(len(total_indices), len(current_indices), len(missing_episodes))
+        # exit()
         latent_episodes_paths = []
-        if len(self.rollout_dataset) - len(existing_indices) != 0:
-            for idx, episode_path in tqdm(
-                enumerate(self.rollout_dataset),
-                total=len(self.rollout_dataset) - len(existing_indices),
+        if missing_episodes:
+            for missing_episode_path, missing_latent_episode_path in tqdm(
+                missing_episodes,
+                total=len(missing_episodes),
                 desc="Generating latent_dataset",
             ):
-                if idx in existing_indices:
-                    continue
-
                 latent_episode = LatentEpisode.from_episode_path(
-                    episode_path, self.vision
+                    missing_episode_path, self.vision
                 )
                 if latent_episode is not None:
-
                     latent_episodes_paths.append(
-                        latent_episode.save(self.root / f"latent_episode_{idx}.pt")
+                        latent_episode.save(missing_latent_episode_path)
                     )
 
         return latent_episodes_paths + self.latent_episodes_paths
 
-    def _load_dataset(self):
+    def _load_dataset(self) -> List[Path]:
         if not self.root.exists():
             return []
-        latent_episodes_paths = sorted(self.root.glob("latent_episode_*"))
-        rollout_indices = {
-            int(path.stem.split("_")[-1])
-            for path in self.rollout_dataset.episodes_paths
-        }
-        latent_indices = {
-            int(path.stem.split("_")[-1]) for path in latent_episodes_paths
-        }
-        # missing_indices = rollout_indices - latent_indices
+        latent_episodes_paths = []
+        for episode_path in self.rollout_dataset.episodes_paths:
+            latent_episode_path = self.root / f"latent_{episode_path.name}"
+            if latent_episode_path.exists():
+                latent_episodes_paths.append(latent_episode_path)
+
         return latent_episodes_paths
 
     def __len__(self):

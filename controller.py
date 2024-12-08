@@ -1,6 +1,9 @@
 import copy
 import math
-from concurrent.futures import ProcessPoolExecutor
+
+# from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures import ThreadPoolExecutor
+
 from pathlib import Path
 
 import gymnasium as gym
@@ -19,11 +22,11 @@ from vision import ConvVAE
 
 class Controller(nn.Module):
     def __init__(
-        self, latent_dimension: int = 32, hidden_units: int = 256, continuos=True
+        self, latent_dimension: int = 32, hidden_units: int = 256, continuous=True
     ):
         super().__init__()
-        self.continuos = continuos
-        self.fc = nn.Linear(latent_dimension + hidden_units, 3 if continuos else 1)
+        self.continuous = continuous
+        self.fc = nn.Linear(latent_dimension + hidden_units, 3 if continuous else 1)
 
     def forward(
         self, latent_observation: torch.Tensor, hidden_state: torch.Tensor
@@ -32,19 +35,6 @@ class Controller(nn.Module):
         return torch.tanh(
             self.fc(torch.cat((latent_observation, hidden_state), dim=-1))
         )
-
-    # def act(self, observation: np.ndarray, vision: ConvVAE, memory: MDN_RNN):
-    #     observation = transforms.Compose(
-    #         [
-    #             transforms.ToPILImage(),
-    #             transforms.Resize((64, 64)),
-    #             transforms.ToTensor(),
-    #         ]
-    #     )(observation)
-    #     latent_observation = self.vision.get_latent(observation.unsqueeze(0))
-    #     latent_observation = latent_observation.unsqueeze(0)
-    #     action = self.controller(latent_observation, hidden_state)
-    #     numpy_action = action.detach().cpu().numpy().ravel()
 
     def get_weights(self):
         return (
@@ -62,13 +52,15 @@ class Controller(nn.Module):
 
     @staticmethod
     def from_pretrained(
-        model_path: Path = Path("models/controller_continuos.pt"),
-    ) -> "MDN_RNN":
+        model_path: Path = Path("models/controller_continuous.pt"),
+    ) -> "Controller":
         if not model_path.exists():
-            raise FileNotFoundError(f"Couldn't find the Mdn-RNN model at {model_path}")
+            raise FileNotFoundError(
+                f"Couldn't find the  Controller model at {model_path}"
+            )
         loaded_data = torch.load(model_path, weights_only=True)
-        controller = MDN_RNN(continuos="continuos" in model_path.name)
-        controller.load_state_dict(loaded_data)
+        controller = Controller(continuous="continuous" in model_path.name)
+        controller.load_state_dict(loaded_data["model_state"])
         return controller
 
 
@@ -109,15 +101,17 @@ class ControllerTrainer:
             n_cols = math.ceil(self.population_size / n_rows)
         return n_rows, n_cols
 
-    def _rollout(self, _index: int):
+    def _rollout(self, args):
+        worker, max_steps = args
         environment = gym.make(self.env_name, render_mode="rgb_array")
         observation, _ = environment.reset()
         hidden_state, cell_state = self.memory.init_hidden()
         cumulative_reward = 0
-        frames = []  # Collect frames for visualization
-        cnt = 0
-        while True:
-            cnt += 1
+        frames = []
+        progress_bar = tqdm(
+            range(max_steps), desc=f"Worker {worker}: Reward {cumulative_reward:.2f}"
+        )
+        for _ in progress_bar:
             frames.append(observation)
             observation: torch.Tensor = self.__transformation(observation)
             latent_observation = self.vision.get_latent(observation.unsqueeze(0))
@@ -135,6 +129,9 @@ class ControllerTrainer:
                 cell_state,
             )
             observation = next_observation
+            progress_bar.set_description(
+                f"Worker {worker}: Reward {cumulative_reward:.2f}"
+            )
         environment.close()
         return frames, cumulative_reward
 
@@ -163,22 +160,18 @@ class ControllerTrainer:
     def train(
         self,
         max_epochs=1,
-        save_path: Path = Path("models"),
+        max_steps=10,
+        save_path: Path = Path("models/controller_continuous.pt"),
     ):
+
+        save_path.parent.mkdir(parents=True, exist_ok=True)
         initial_epoch = 0
         if save_path.exists():
-            checkpoints_path = sorted(
-                save_path.glob("controller_epoch_*"),
-                key=lambda p: int(p.stem.split("_")[-1]),
-            )
-            if len(checkpoints_path) > 0:
-                last_checkpoint_path = checkpoints_path[-1]
-                loaded_data = torch.load(last_checkpoint_path, weight_only=True)
-                self.controller.load_state_dict(loaded_data)
-                initial_epoch = int(last_checkpoint_path.stem.split("_")[-1])
-        save_path.mkdir(parents=True, exist_ok=True)
+            controller_metadata = torch.load(save_path, weights_only=True)
+            initial_epoch = controller_metadata["epoch"]
+            self.controller.load_state_dict(controller_metadata["model_state"])
+
         initial_solution = self.controller.get_weights()
-        print(f"Initial solution size: {len(initial_solution)}")
         solver = CMAEvolutionStrategy(
             initial_solution, 0.2, {"popsize": self.population_size}
         )
@@ -189,11 +182,14 @@ class ControllerTrainer:
             leave=False,
         ):
             solutions = solver.ask()
-            with ProcessPoolExecutor(max_workers=self.population_size) as executor:
+            with ThreadPoolExecutor(max_workers=self.population_size) as executor:
                 results = list(
                     executor.map(
                         self._rollout,
-                        range(self.population_size),
+                        zip(
+                            range(self.population_size),
+                            [max_steps] * self.population_size,
+                        ),
                     )
                 )
 
@@ -208,8 +204,12 @@ class ControllerTrainer:
             if bestfit > 900:
                 print("\tBest solution found")
                 break
-
-        self.controller.set_weights(bestsol)
-        save_path.parent.mkdir(parents=True, exist_ok=True)
-        torch.save(self.controller.state_dict(), save_path)
+            self.controller.set_weights(bestsol)
+            torch.save(
+                {
+                    "epoch": epoch,
+                    "model_state": self.controller.state_dict(),
+                },
+                save_path,
+            )
         print(f"Model saved to {save_path}")

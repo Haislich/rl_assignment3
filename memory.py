@@ -17,15 +17,15 @@ class MDN_RNN(nn.Module):
         latent_dimension: int = 32,
         hidden_units: int = 256,
         num_mixtures: int = 5,
-        continuos=True,
+        continuous=True,
     ):
         super().__init__()
         self.hidden_dim = hidden_units
         self.num_mixtures = num_mixtures
         self.latent_dimension = latent_dimension
-        self.continuos = continuos
+        self.continuous = continuous
         self.rnn = nn.LSTM(
-            latent_dimension + (3 if continuos else 1), hidden_units, batch_first=True
+            latent_dimension + (3 if continuous else 1), hidden_units, batch_first=True
         )
         self.fc_pi = nn.Linear(hidden_units, num_mixtures)
         self.fc_mu = nn.Linear(hidden_units, num_mixtures * latent_dimension)
@@ -45,7 +45,7 @@ class MDN_RNN(nn.Module):
         hidden_state: Optional[torch.Tensor] = None,
         cell_state: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        if not self.continuos:
+        if not self.continuous:
             actions = actions.unsqueeze(-1)
         rnn_out, (hidden_state, _cell_state) = self.rnn(
             torch.cat([latents, actions], dim=-1),
@@ -104,13 +104,13 @@ class MDN_RNN(nn.Module):
 
     @staticmethod
     def from_pretrained(
-        model_path: Path = Path("models/memory/memory_continuos.pt"),
+        model_path: Path = Path("models/memory_continuous.pt"),
     ) -> "MDN_RNN":
         if not model_path.exists():
             raise FileNotFoundError(f"Couldn't find the Mdn-RNN model at {model_path}")
         loaded_data = torch.load(model_path, weights_only=True)
-        mdn_rnn = MDN_RNN(continuos="continuos" in model_path.name)
-        mdn_rnn.load_state_dict(loaded_data)
+        mdn_rnn = MDN_RNN(continuous="continuous" in model_path.name)
+        mdn_rnn.load_state_dict(loaded_data["model_state"])
         return mdn_rnn
 
 
@@ -136,7 +136,6 @@ class MemoryTrainer:
                 len(train_dataloader) / train_dataloader.batch_size  # type:ignore
             ),
             desc="Processing latent episode batches",
-            leave=False,
         ):
             batch_latent_episodes_observations = batch_latent_episodes_observations.to(
                 self.device
@@ -200,28 +199,23 @@ class MemoryTrainer:
         optimizer: torch.optim.Optimizer,
         val_dataloader: Optional[LatentDataloader] = None,
         epochs: int = 10,
-        save_path: Path = Path("models"),
+        save_path: Path = Path("models/memory_continuous.pt"),
         log_dir=Path("logs/memory"),
     ):
-        save_path = save_path / "memory"
-        save_path.mkdir(parents=True, exist_ok=True)
-
+        save_path.parent.mkdir(parents=True, exist_ok=True)
         writer = SummaryWriter(log_dir=log_dir)
         log_dir.mkdir(parents=True, exist_ok=True)
-
-        resume_epoch = 0
-        checkpoint_path = sorted(
-            save_path.glob("epoch_*.pt"),
-            key=lambda p: (int(p.stem.split("_")[1]),),  # Extract epoch number
-        )
-        if len(checkpoint_path) > 0:
-            last_checkpoint = checkpoint_path[-1]
-            checkpoint = torch.load(last_checkpoint, weights_only=True)
-            self.memory.load_state_dict(checkpoint["model_state"])
-            optimizer.load_state_dict(checkpoint["optimizer_state"])
-            resume_epoch = checkpoint["epoch"]
-
-        for epoch in tqdm(range(resume_epoch, epochs), total=epochs):
+        initial_epoch = 0
+        if save_path.exists():
+            memory_metadata = torch.load(save_path, weights_only=True)
+            initial_epoch = memory_metadata["epoch"]
+            self.memory.load_state_dict(memory_metadata["model_state"])
+            optimizer.load_state_dict(memory_metadata["optimizer_state"])
+        for epoch in tqdm(
+            range(initial_epoch, epochs + initial_epoch),
+            total=epochs,
+            desc="Training Memory",
+        ):
             print(f"Epoch {epoch + 1}/{epochs}")
             train_loss = self._train_step(
                 train_dataloader,
@@ -234,22 +228,19 @@ class MemoryTrainer:
             writer.add_scalar("Loss/Test", test_loss, epoch)
             print()
             print(
-                f"\tEpoch {epoch + 1}/{epochs} | "
+                f"\tEpoch {epoch + 1}/{epochs+initial_epoch} | "
                 f"Train Loss: {train_loss:.5f} | "
                 f"Test Loss: {test_loss:.5f}"
             )
-            checkpoint_save_path = save_path / "epochs" / f"epoch_{epoch}.pt"
-            checkpoint_save_path.parent.mkdir(parents=True, exist_ok=True)
             torch.save(
                 {
                     "epoch": epoch,
                     "model_state": self.memory.state_dict(),
                     "optimizer_state": optimizer.state_dict(),
                 },
-                checkpoint_save_path,
+                save_path,
             )
         if val_dataloader is not None:
             val_loss = self._test_step(test_dataloader)
             print(f"Validation Loss: {val_loss:.5f}")
-        torch.save(self.memory.state_dict(), save_path / "memory.pt")
         print(f"Model saved to {save_path}")

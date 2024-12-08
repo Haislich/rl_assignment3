@@ -54,16 +54,16 @@ class RolloutDataset(Dataset):
         self,
         num_rollouts: int = 1,
         max_steps: int = 1,
-        continuos: bool = True,
+        continuous: bool = True,
         env_name: str = "CarRacing-v2",
         root: Path = Path("./data/rollouts"),
     ):
         self.num_rollouts = num_rollouts
         self.max_steps = max_steps
-        self.continuos = continuos
+        self.continuous = continuous
         self.env_name = env_name
         self.root = (
-            root / ("continuos" if continuos else "discrete") / f"{max_steps}steps"
+            root / ("continuous" if continuous else "discrete") / f"{max_steps}steps"
         )
         self.__transformation = transforms.Compose(
             [
@@ -96,7 +96,7 @@ class RolloutDataset(Dataset):
         new_rollout_dataset = RolloutDataset(
             num_rollouts=old_rollout_dataset.num_rollouts,  # type:ignore
             max_steps=old_rollout_dataset.max_steps,  # type:ignore
-            continuos=old_rollout_dataset.continuos,  # type: ignore
+            continuous=old_rollout_dataset.continuous,  # type: ignore
             env_name=old_rollout_dataset.env_name,  # type: ignore
         )
         new_rollout_dataset.episodes_paths = new_episodes_paths
@@ -137,7 +137,7 @@ class RolloutDataset(Dataset):
         return episode_paths
 
     def _sampling_strategy(self, recent_acceleration: bool):
-        if self.continuos:
+        if self.continuous:
             action = np.random.normal([0, 0.75, 0.25], [0.5, 0.1, 0.1])
             action[0] = action[0].clip(-1, 1)
             action[1] = action[1].clip(0, 1)
@@ -161,7 +161,7 @@ class RolloutDataset(Dataset):
         observations, actions, rewards = [], [], []
         env = gym.make(
             id=self.env_name,
-            continuous=self.continuos,
+            continuous=self.continuous,
         )
         observation, _ = env.reset()
         recent_acceleration = False
