@@ -58,7 +58,7 @@ class Controller(nn.Module):
             raise FileNotFoundError(
                 f"Couldn't find the  Controller model at {model_path}"
             )
-        loaded_data = torch.load(model_path, weights_only=False)
+        loaded_data = torch.load(model_path, weights_only=False, map_location="cpu")
         controller = Controller(continuous="continuous" in model_path.name)
         controller.load_state_dict(loaded_data["model_state"])
         return controller
@@ -179,9 +179,14 @@ class ControllerTrainer:
         bestfit = -float("inf")
         bestsol = None
         if save_path.exists():
-            controller_metadata = torch.load(save_path, weights_only=True)
+            controller_metadata = torch.load(
+                save_path, weights_only=True, map_location="cpu"
+            )
             initial_epoch = controller_metadata["epoch"]
             self.controller.load_state_dict(controller_metadata["model_state"])
+            self.controllers = [
+                copy.deepcopy(self.controller) for _ in range(self.population_size)
+            ]
             bestfit = controller_metadata.get("best_fitness", bestfit)
             bestsol = self.controller.get_weights()
 
@@ -202,7 +207,7 @@ class ControllerTrainer:
                 controller.set_weights(solution)
             hidden_state, cell_state = self.memory.init_hidden()
             # Parallel rollout evaluation
-            with ThreadPoolExecutor(max_workers=self.population_size) as executor:
+            with ThreadPoolExecutor() as executor:
                 fitlist = list(
                     executor.map(
                         self._rollout,

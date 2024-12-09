@@ -33,11 +33,6 @@ class LatentEpisode:
             )
         except FileNotFoundError:
             print(f"Episode {episode_path} hasn't been found, it will be skipped")
-        except Exception as e:  # type:ignore
-            print(
-                f"Some unknown exception has happend with {episode_path}, it will be skipped"
-            )
-            print(f"\tException:{e}")
 
         return latent_episode
 
@@ -59,7 +54,9 @@ class LatentEpisode:
             raise FileNotFoundError(
                 f"Couldn't find the episode at {latent_episode_path}"
             )
-        metadata = torch.load(latent_episode_path, weights_only=True)
+        metadata = torch.load(
+            latent_episode_path, weights_only=True, map_location="cpu"
+        )
         return LatentEpisode(
             latent_observations=metadata["latent_observations"],
             actions=metadata["actions"],

@@ -6,7 +6,6 @@ from math import ceil
 
 import torch
 import torch.nn.functional as F
-import torchvision.transforms as T
 from torch import nn
 from torch.utils.tensorboard.writer import SummaryWriter
 from tqdm import tqdm
@@ -66,7 +65,6 @@ class ConvVAE(nn.Module):
     def forward(
         self, x: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        # x = T.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])(x)
         mu, log_sigma = self.encoder(x)
         sigma = torch.exp(log_sigma)
         z = mu + sigma * torch.randn_like(sigma)
@@ -92,7 +90,7 @@ class ConvVAE(nn.Module):
         original: torch.Tensor,
         mu: torch.Tensor,
         log_sigma: torch.Tensor,
-        beta: float = 0.1,
+        _beta: float = 0.1,
     ) -> torch.Tensor:
         reconstruction_loss = (
             F.mse_loss(
@@ -105,22 +103,22 @@ class ConvVAE(nn.Module):
         kl_divergence = -0.5 * torch.sum(
             1 + 2 * log_sigma - mu.pow(2) - (2 * log_sigma).exp()
         )
-        return reconstruction_loss + kl_divergence
+        return reconstruction_loss + _beta * kl_divergence
 
     @staticmethod
     def from_pretrained(
+        device,
         model_path: Path = Path("models/vision.pt"),
     ) -> "ConvVAE":
         if not model_path.exists():
             raise FileNotFoundError(f"Couldn't find the ConvVae model at {model_path}")
-        loaded_data = torch.load(model_path, weights_only=False)
+        loaded_data = torch.load(model_path, weights_only=False, map_location=device)
         conv_vae = ConvVAE()
         conv_vae.load_state_dict(loaded_data["model_state"])
         return conv_vae
 
 
 class VisionTrainer:
-
     def __init__(self, vision: ConvVAE) -> None:
         self.vision = vision
         self.device = next(self.vision.parameters()).device
@@ -239,7 +237,9 @@ class VisionTrainer:
         log_dir.mkdir(parents=True, exist_ok=True)
         initial_epoch = 0
         if save_path.exists():
-            vision_metadata = torch.load(save_path, weights_only=True)
+            vision_metadata = torch.load(
+                save_path, weights_only=True, map_location=self.device
+            )
             initial_epoch = vision_metadata["epoch"]
             self.vision.load_state_dict(vision_metadata["model_state"])
             optimizer.load_state_dict(vision_metadata["optimizer_state"])

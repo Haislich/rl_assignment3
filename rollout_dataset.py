@@ -41,7 +41,7 @@ class Episode:
     def load(episode_path: Path):
         if not episode_path.exists():
             raise FileNotFoundError(f"Couldn't find the episode at {episode_path}")
-        metadata = torch.load(episode_path, weights_only=True)
+        metadata = torch.load(episode_path, weights_only=True, map_location="cpu")
         return Episode(
             observations=metadata["observations"],
             actions=metadata["actions"],
@@ -136,26 +136,6 @@ class RolloutDataset(Dataset):
         ]
         return episode_paths[: min(self.num_rollouts, len(episode_paths))]
 
-    def _sampling_strategy(self, recent_acceleration: bool):
-        if self.continuous:
-            action = np.random.normal([0, 0.75, 0.25], [0.5, 0.1, 0.1])
-            action[0] = action[0].clip(-1, 1)
-            action[1] = action[1].clip(0, 1)
-            action[2] = action[2].clip(0, 1)
-        else:
-            if not recent_acceleration:
-                action = np.array(3)
-                recent_acceleration = True
-            else:
-                action = np.array(
-                    np.random.choice(
-                        [0, 1, 2, 3, 4],
-                        p=[0.1, 0.3, 0.3, 0.2, 0.1],
-                    )
-                )
-                recent_acceleration = action == 3
-        return action, recent_acceleration
-
     def _execute_single_rollout(self, max_steps: int, index: int = 0) -> Optional[Path]:
 
         observations, actions, rewards = [], [], []
@@ -164,9 +144,8 @@ class RolloutDataset(Dataset):
             continuous=self.continuous,
         )
         observation, _ = env.reset()
-        recent_acceleration = False
         for _ in range(max_steps):
-            action, recent_acceleration = self._sampling_strategy(recent_acceleration)
+            action = env.action_space.sample()
             next_observation, reward, done, _, _ = env.step(action)
             observation = self.__transformation(observation)
             observations.append(observation)

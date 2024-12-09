@@ -233,7 +233,7 @@ class Policy(nn.Module):
             epochs=vision_epochs,
             optimizer=torch.optim.Adam(self.vision.parameters()),
         )
-        idxs = [np.random.randint(0, num_rollouts) for _ in range(5)]
+        idxs = [np.random.randint(0, num_rollouts) for _ in range(3)]
         # Only create the gifs to check actual visual improvements
         if vision_epochs > 0:
             for idx in idxs:
@@ -289,9 +289,9 @@ class Policy(nn.Module):
 
     def load(self):
         try:
-            self.vision = ConvVAE().from_pretrained().to(self.device)
-            self.memory = MDN_RNN().from_pretrained().to(self.device)
-            self.controller = Controller().from_pretrained().to("cpu")
+            self.vision = ConvVAE().from_pretrained(device=self.device)
+            self.memory = MDN_RNN().from_pretrained(device=self.device)
+            self.controller = Controller().from_pretrained()
         except FileNotFoundError:
             self.vision = ConvVAE().to(self.device)
             self.memory = MDN_RNN().to(self.device)
@@ -307,13 +307,15 @@ class Policy(nn.Module):
 if __name__ == "__main__":
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     policy = Policy(device)
-    # policy.train(
-    #     num_rollouts=100,
-    #     max_steps=30,
-    #     batch_size=32,
-    #     vision_epochs=5,
-    #     memory_epochs=5,
-    #     controller_epochs=10,
-    #     population_size=16,
-    # )
-    policy.train()
+    policy.train(
+        num_rollouts=15,
+        max_steps=1000,
+        vision_epochs=0,
+        vision_batch_size=64,
+        memory_epochs=100,
+        memory_batch_size=128,
+        controller_epochs=10,
+        controller_max_steps=100,
+        population_size=16,
+    )
+    # policy.train()

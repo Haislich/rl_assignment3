@@ -104,11 +104,12 @@ class MDN_RNN(nn.Module):
 
     @staticmethod
     def from_pretrained(
+        device,
         model_path: Path = Path("models/memory_continuous.pt"),
     ) -> "MDN_RNN":
         if not model_path.exists():
             raise FileNotFoundError(f"Couldn't find the Mdn-RNN model at {model_path}")
-        loaded_data = torch.load(model_path, weights_only=True)
+        loaded_data = torch.load(model_path, weights_only=True, map_location=device)
         mdn_rnn = MDN_RNN(continuous="continuous" in model_path.name)
         mdn_rnn.load_state_dict(loaded_data["model_state"])
         return mdn_rnn
