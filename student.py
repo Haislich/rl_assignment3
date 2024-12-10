@@ -195,8 +195,8 @@ class Policy(nn.Module):
 
     def train(
         self,
-        num_rollouts=10000,
-        max_steps=1000,
+        num_rollouts=100,
+        max_steps=2000,
         vision_batch_size=64,
         vision_epochs=0,
         memory_batch_size=128,
@@ -233,7 +233,7 @@ class Policy(nn.Module):
             epochs=vision_epochs,
             optimizer=torch.optim.Adam(self.vision.parameters()),
         )
-        idxs = [np.random.randint(0, num_rollouts) for _ in range(3)]
+        idxs = [0]  # [np.random.randint(0, num_rollouts) for _ in range(1)]
         # Only create the gifs to check actual visual improvements
         if vision_epochs > 0:
             for idx in idxs:
@@ -279,7 +279,7 @@ class Policy(nn.Module):
                 )
 
         controller_trainer = ControllerTrainer(
-            self.controller, self.vision, self.memory, population_size=population_size
+            self.controller, population_size=population_size
         )
         controller_trainer.train(controller_epochs, controller_max_steps)
 
@@ -308,14 +308,13 @@ if __name__ == "__main__":
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     policy = Policy(device)
     policy.train(
-        num_rollouts=15,
+        num_rollouts=100,
         max_steps=1000,
         vision_epochs=0,
         vision_batch_size=64,
-        memory_epochs=100,
-        memory_batch_size=128,
-        controller_epochs=10,
-        controller_max_steps=100,
-        population_size=16,
+        memory_epochs=0,
+        memory_batch_size=256,
+        controller_epochs=50,
+        controller_max_steps=3,
+        population_size=24,
     )
-    # policy.train()

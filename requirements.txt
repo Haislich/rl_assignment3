@@ -9,4 +9,4 @@ torchvision
 matplotlib
 tqdm
 cma
-tensorboard
+# tensorboard

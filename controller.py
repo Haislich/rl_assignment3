@@ -1,17 +1,9 @@
-import copy
-import math
-
-# from concurrent.futures import ProcessPoolExecutor
-from concurrent.futures import ThreadPoolExecutor
-
 from pathlib import Path
 
 import gymnasium as gym
-import matplotlib.pyplot as plt
 import numpy as np
 import torch
 from cma import CMAEvolutionStrategy
-from matplotlib.animation import FuncAnimation
 from torch import nn
 from torchvision import transforms
 from tqdm import tqdm
@@ -31,7 +23,6 @@ class Controller(nn.Module):
     def forward(
         self, latent_observation: torch.Tensor, hidden_state: torch.Tensor
     ) -> torch.Tensor:
-
         return torch.tanh(
             self.fc(torch.cat((latent_observation, hidden_state), dim=-1))
         )
@@ -65,106 +56,63 @@ class Controller(nn.Module):
 
 
 class ControllerTrainer:
+    transformation = transforms.Compose(
+        [
+            transforms.ToPILImage(),
+            transforms.Resize((64, 64)),
+            transforms.ToTensor(),
+        ]
+    )
+    vision = ConvVAE.from_pretrained("cpu").eval()
+    memory = MDN_RNN.from_pretrained("cpu").eval()
+
     def __init__(
         self,
         controller: Controller,
-        vision: ConvVAE,
-        memory: MDN_RNN,
         population_size=16,
         env_name="CarRacing-v2",
-        render=False,
     ):
         self.controller = controller
-        self.vision = vision.to("cpu").eval()
-        self.memory = memory.to("cpu").eval()
-        self.population_size = population_size
         self.env_name = env_name
-        self.environments = [
-            gym.make(self.env_name, render_mode="rgb_array")
-            for _ in range(population_size)
-        ]
-        self.n_rows, self.n_cols = self._get_rows_and_cols()
-        self.controllers = [
-            copy.deepcopy(controller) for _ in range(self.population_size)
-        ]
-        self.render = render
-        self.__transformation = transforms.Compose(
-            [
-                transforms.ToPILImage(),
-                transforms.Resize((64, 64)),
-                transforms.ToTensor(),
-            ]
-        )
+        self.environment = gym.make(env_name, render_mode="rgb_array")
+        self.population_size = population_size
 
-    def _get_rows_and_cols(self):
-        sqrt_num = math.sqrt(self.population_size)
-        n_rows = math.floor(sqrt_num)
-        n_cols = math.ceil(self.population_size / n_rows)
-        while n_rows * n_cols < self.population_size:
-            n_rows += 1
-            n_cols = math.ceil(self.population_size / n_rows)
-        return n_rows, n_cols
+    def _rollout(self, solution, max_steps, index):
+        controller = Controller()
+        controller.set_weights(solution)
+        total_reward = 0
+        hidden_state, cell_state = self.memory.init_hidden()
 
-    def animate_rollouts(self, all_frames):
-        """Animate the collected frames after all rollouts are complete."""
-        fig, ax = plt.subplots(self.n_rows, self.n_cols, figsize=(10, 8))
-        ax = ax.flatten()
-        images = []
-        for axis in ax:
-            img = axis.imshow(np.zeros((64, 64, 3), dtype=np.uint8), vmin=0, vmax=255)
-            axis.axis("off")
-            images.append(img)
-
-        def update(frame):
-            for i, img in enumerate(images):
-                if i < len(all_frames) and frame < len(
-                    all_frames[i]
-                ):  # Ensure valid indices
-                    img.set_data(all_frames[i][frame])
-            return images
-
-        max_frames = max(len(frames) for frames in all_frames)
-        _anim = FuncAnimation(fig, update, frames=max_frames, interval=50, blit=True)
-        plt.show()
-
-    def _rollout(self, args):
-        worker, max_steps, hidden_state, cell_state = args
-        environment = self.environments[worker]
-        observation, _ = environment.reset()
-        controller = self.controllers[worker]
-        cumulative_reward = 0
-        progress_bar = tqdm(
-            range(max_steps),
-            desc=f"Worker {worker}: Reward {cumulative_reward:.2f}",
-            leave=False,
-        )
-        for _ in progress_bar:
-            observation = self.__transformation(observation)
-            latent_observation = self.vision.get_latent(observation.unsqueeze(0))
-            latent_observation = latent_observation.unsqueeze(0)
-            action = controller(latent_observation, hidden_state)
-            numpy_action = action.detach().cpu().numpy().ravel()
-            next_observation, reward, done, _, _ = environment.step(numpy_action)
-            cumulative_reward += float(reward)
-            if done:
-                break
-            _mu, _pi, _sigma, hidden_state, cell_state = self.memory.forward(
-                latent_observation,
-                action,
-                hidden_state,
-                cell_state,
-            )
-            # Try to avoid memory leaks
-            observation = None
-            latent_observation = None
-            action = None
-            numpy_action = None
-
-            observation = next_observation
-            progress_bar.set_description(
-                f"Worker {worker}: Reward {cumulative_reward:.2f}"
-            )
-        return cumulative_reward
+        for _ in tqdm(range(max_steps), desc=f"Worker {index}", leave=False):
+            # for _ in range(max_steps):
+            episode_reward = 0
+            observation, _ = self.environment.reset()
+            with torch.no_grad():
+                while True:
+                    observation: torch.Tensor = self.transformation(observation)
+                    latent_observation = self.vision.get_latent(
+                        observation.unsqueeze(0)
+                    )
+                    latent_observation = latent_observation.unsqueeze(0)
+                    action = controller(latent_observation, hidden_state)
+                    numpy_action = action.detach().cpu().numpy().ravel()
+                    next_observation, reward, terminated, truncated, _ = (
+                        self.environment.step(numpy_action)
+                    )
+                    episode_reward += float(reward)
+                    done = terminated or truncated
+                    if done:
+                        break
+                    _mu, _pi, _sigma, hidden_state, cell_state = self.memory.forward(
+                        latent_observation,
+                        action,
+                        hidden_state,
+                        cell_state,
+                    )
+                    observation = next_observation
+            total_reward += episode_reward
+        ret = total_reward / max_steps
+        return ret
 
     def train(
         self,
@@ -174,77 +122,40 @@ class ControllerTrainer:
     ):
         save_path.parent.mkdir(parents=True, exist_ok=True)
 
-        # Initialize or load existing progress
-        initial_epoch = 0
-        bestfit = -float("inf")
-        bestsol = None
-        if save_path.exists():
-            controller_metadata = torch.load(
-                save_path, weights_only=True, map_location="cpu"
-            )
-            initial_epoch = controller_metadata["epoch"]
-            self.controller.load_state_dict(controller_metadata["model_state"])
-            self.controllers = [
-                copy.deepcopy(self.controller) for _ in range(self.population_size)
-            ]
-            bestfit = controller_metadata.get("best_fitness", bestfit)
-            bestsol = self.controller.get_weights()
-
         # Initialize CMA-ES
         initial_solution = self.controller.get_weights()
+        bestfit = float("-inf")
+        if save_path.exists():
+            controller_metadata = torch.load(save_path, weights_only=True)
+            initial_solution = controller_metadata["model_state"]
+            bestfit = controller_metadata["bestfit"]
         solver = CMAEvolutionStrategy(
-            initial_solution, 0.1, {"popsize": self.population_size}
+            initial_solution, 0.5, {"popsize": self.population_size}
         )
         progress_bar = tqdm(
-            range(initial_epoch, max_epochs + initial_epoch),
+            range(max_epochs),
             total=max_epochs,
-            desc=f"Calculating solutions with CMAES, {bestfit=}",
+            desc="Calculating solutions with CMAES",
             leave=False,
         )
-        for epoch in progress_bar:
-            solutions = solver.ask()
-            for controller, solution in zip(self.controllers, solutions):
-                controller.set_weights(solution)
-            hidden_state, cell_state = self.memory.init_hidden()
-            # Parallel rollout evaluation
-            with ThreadPoolExecutor() as executor:
-                fitlist = list(
-                    executor.map(
-                        self._rollout,
-                        zip(
-                            range(self.population_size),
-                            [max_steps] * self.population_size,
-                            [hidden_state] * self.population_size,
-                            [cell_state] * self.population_size,
-                        ),
-                    )
-                )
-                executor.shutdown()
 
-            fitlist = [-fitness for fitness in fitlist]
+        for _ in progress_bar:
+            solutions = solver.ask()
+            fitlist = []
+            for index, solution in enumerate(solutions):
+                fitlist.append(-self._rollout(solution, max_steps, index))
+
             solver.tell(solutions, fitlist)
             epoch_bestsol, epoch_bestfit, *_ = solver.result
             epoch_bestfit = -epoch_bestfit
-
-            # Update best solution and controller only if fitness improves
+            tqdm.write(f"{epoch_bestfit=}")
             if epoch_bestfit > bestfit:
                 bestfit = epoch_bestfit
-                bestsol = epoch_bestsol
-                self.controller.set_weights(bestsol)
-
-                # Save the best solution and current progress
+                self.controller.set_weights(epoch_bestsol)
                 torch.save(
                     {
-                        "epoch": epoch + 1,
                         "model_state": self.controller.state_dict(),
-                        "best_fitness": bestfit,
+                        "bestfit": epoch_bestfit,
                     },
                     save_path,
                 )
-
-            progress_bar.set_description(
-                f"Calculating solutions with CMAES, {bestfit=}"
-            )
-
-        print(f"Training complete. Best fitness: {bestfit}")
-        print(f"Model saved to {save_path}")

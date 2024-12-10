@@ -4,7 +4,6 @@ import torch
 from torch import nn
 import torch.nn.functional as F
 import torch.optim.adam
-from torch.utils.tensorboard.writer import SummaryWriter
 
 from tqdm import tqdm
 from latent_dataset import LatentDataloader
@@ -192,7 +191,7 @@ class MemoryTrainer:
                 )
                 loss = self.memory.loss(pi, mu, sigma, target)
                 test_loss += loss.item()
-            test_loss /= len(test_dataloader)
+        test_loss /= len(test_dataloader)
         return test_loss
 
     def train(
@@ -203,11 +202,8 @@ class MemoryTrainer:
         val_dataloader: Optional[LatentDataloader] = None,
         epochs: int = 10,
         save_path: Path = Path("models/memory_continuous.pt"),
-        log_dir=Path("logs/memory"),
     ):
         save_path.parent.mkdir(parents=True, exist_ok=True)
-        writer = SummaryWriter(log_dir=log_dir)
-        log_dir.mkdir(parents=True, exist_ok=True)
         initial_epoch = 0
         if save_path.exists():
             memory_metadata = torch.load(save_path, weights_only=True)
@@ -224,11 +220,7 @@ class MemoryTrainer:
                 train_dataloader,
                 optimizer,
             )
-            test_loss = 0  # self._test_step(test_dataloader)
-
-            # Log to TensorBoard
-            writer.add_scalar("Loss/Train", train_loss, epoch)
-            writer.add_scalar("Loss/Test", test_loss, epoch)
+            test_loss = self._test_step(test_dataloader)
 
             tqdm.write(
                 f"\tEpoch {epoch + 1}/{epochs+initial_epoch} | "
@@ -243,7 +235,7 @@ class MemoryTrainer:
                 },
                 save_path,
             )
-        # if val_dataloader is not None:
-        #     val_loss = self._test_step(test_dataloader)
-        #     print(f"Validation Loss: {val_loss:.5f}")
+        if val_dataloader is not None:
+            val_loss = self._test_step(test_dataloader)
+            print(f"Validation Loss: {val_loss:.5f}")
         print(f"Model saved to {save_path}")
