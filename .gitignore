@@ -1,4 +1,3 @@
-rl/**
 data/**
-__pycache__/**
-logs/**
+mypy_cache/**
+data

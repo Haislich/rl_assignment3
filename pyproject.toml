@@ -1,0 +1,25 @@
+[tool.poetry]
+name = "world-models"
+version = "0.1.0"
+description = ""
+authors = ["Haislich <josedlv936@gmail.com>"]
+readme = "README.md"
+packages = [{ include = "world_models", from = "src" }]
+
+[tool.poetry.dependencies]
+python = "3.10.15"
+gymnasium = "^1.0.0"
+torch = "^2.5.1"
+numpy = "1.26"
+torchvision = "^0.20.1"
+tqdm = "^4.67.1"
+
+
+[tool.poetry.group.dev.dependencies]
+pylint = "^3.3.2"
+black = "^24.10.0"
+mypy = "^1.13.0"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
