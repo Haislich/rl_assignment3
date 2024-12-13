@@ -76,6 +76,7 @@ class ConvVAE(nn.Module):
         return reconstruction, mu, log_sigma
 
     def get_latent(self, observation: torch.Tensor) -> torch.Tensor:
+        observation = observation.to(self.device)
         mu, log_sigma = self.encoder.forward(observation)
         sigma = log_sigma.exp()
         return mu + sigma * torch.randn_like(sigma)

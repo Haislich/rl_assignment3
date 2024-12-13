@@ -9,9 +9,7 @@ from world_models.episode import Episode, LatentEpisode
 
 
 class RolloutDataset(Dataset[Episode | LatentEpisode]):
-
     def __init__(self, episodes: List[Episode] | List[LatentEpisode]):
-
         self.num_rollouts = len(episodes)
         self.steps = min(len(episode) for episode in episodes)
         self.episodes = []
@@ -20,18 +18,6 @@ class RolloutDataset(Dataset[Episode | LatentEpisode]):
             episode.actions = episode.actions[: self.steps]
             episode.rewards = episode.rewards[: self.steps]
             self.episodes.append(episode)
-
-        print(
-            [
-                (
-                    episode.observations.shape[0],
-                    episode.rewards.shape[0],
-                    episode.actions.shape[0],
-                )
-                for episode in episodes
-            ]
-        )
-        # exit()
 
     def __getitem__(self, index) -> Episode | LatentEpisode:
         return self.episodes[index]

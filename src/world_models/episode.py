@@ -8,6 +8,9 @@ class Episode:
     actions: torch.Tensor
     rewards: torch.Tensor
 
+    def cumulative_reward(self):
+        return float(sum(self.rewards))
+
     def __len__(self):
         return min(
             [

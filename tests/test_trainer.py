@@ -1,4 +1,12 @@
-from world_models.trainer import Trainer, ControllerArgs
+from concurrent.futures import ProcessPoolExecutor
+from time import sleep
 
 
-trainer = Trainer(controller_args=ControllerArgs(num_agents=8))
+def f(a):
+    sleep(1)
+    return a
+
+
+with ProcessPoolExecutor(max_workers=1) as executor:
+    r = list(executor.map(f, range(30)))
+print(r)

@@ -1,21 +1,19 @@
+from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 
 import gymnasium as gym
 import torch
-from torch.utils.tensorboard.writer import SummaryWriter
-
-from concurrent.futures import ProcessPoolExecutor
 from cma import CMAEvolutionStrategy
+from torch.utils.tensorboard.writer import SummaryWriter
+from tqdm import tqdm
 
+from world_models.dataset import RolloutDataloader, RolloutDataset
+from world_models.episode import Episode, LatentEpisode
 from world_models.models.controller import Controller
 from world_models.models.memory import MDN_RNN
 from world_models.models.vision import ConvVAE
 from world_models.policy import Policy
-from tqdm import tqdm
-
-from world_models.episode import Episode, LatentEpisode
-from world_models.dataset import RolloutDataloader, RolloutDataset
 
 
 @dataclass
@@ -62,44 +60,64 @@ class Trainer:
         self.memory = MDN_RNN(device=device)
         self.controller = Controller(device=device)
 
-    def rollout(self, policy):
+    def rollout(self, policy: Policy):
         environment = gym.make("CarRacing-v2", render_mode="rgb_array")
-        total_reward = 0.0
-        episodes = []
-        for _ in range(self.controller_args.episodes_per_generation):
-            observation, _ = environment.reset()
-            episode_reward, observations, actions, rewards = 0.0, [], [], []
+        observation, _ = environment.reset()
+        episode_reward, observations, actions, rewards = 0.0, [], [], []
 
-            while True:
-                action = policy.act(observation)
-                next_observation, reward, terminated, truncated, _ = environment.step(
-                    action
-                )
-                episode_reward += float(reward)
-
-                if terminated or truncated:
-                    break
-
-                observations.append(policy.transformation(observation))
-                actions.append(torch.from_numpy(action))
-                rewards.append(torch.tensor(reward))
-
-                observation = next_observation
-
-            total_reward += episode_reward
-            episodes.append(
-                Episode(
-                    torch.stack(observations),
-                    torch.stack(actions),
-                    torch.stack(rewards),
-                )
+        while True:
+            action = policy.act(observation)
+            next_observation, reward, terminated, truncated, _ = environment.step(
+                action
             )
+            episode_reward += float(reward)
 
-        average_reward = total_reward / self.controller_args.episodes_per_generation
-        return episodes, average_reward
+            if terminated or truncated:
+                break
 
-    def _evolve_controller(self):
-        ...
+            observations.append(policy.transformation(observation))
+            actions.append(torch.from_numpy(action))
+            rewards.append(torch.tensor(reward))
+
+            observation = next_observation
+
+        return Episode(
+            torch.stack(observations),
+            torch.stack(actions),
+            torch.stack(rewards),
+        )
+
+    def _evaluate_controller(self, solutions) -> tuple[list[Episode], list[float]]:
+        episodes: list[Episode] = []
+        rewards: list[float] = []
+        for solution in solutions:
+            for _ in tqdm(
+                range(self.controller_args.episodes_per_generation),
+                desc="Worker",
+                leave=False,
+            ):
+                mean_reward = 0.0
+                controller = Controller().set_weights(solution)
+                policy = Policy(
+                    self.vision,
+                    self.memory,
+                    controller,
+                    device=self.device,
+                )
+                for _ in tqdm(
+                    range(self.controller_args.episodes_per_generation),
+                    desc="Generating episodes",
+                    leave=False,
+                ):
+
+                    episode = self.rollout(policy)
+                    episodes.append(episode)
+                    mean_reward += episode.cumulative_reward()
+                mean_reward /= self.controller_args.episodes_per_generation
+                rewards.append(mean_reward)
+                torch.cuda.empty_cache()
+        return episodes, rewards
+
     def _train_vision(
         self,
         rollout_dataloader: RolloutDataloader,
@@ -109,12 +127,12 @@ class Trainer:
     ):
         self.vision.train()
 
-        train_loss = 0.0
         initial_epoch = trainer_epoch * self.vision_args.epochs
         for epoch in tqdm(
             range(initial_epoch, initial_epoch + self.vision_args.epochs),
             desc="Training vision",
         ):
+            train_loss = 0.0
             batch_number = 0
             for batch_episodes_observations, _, _ in tqdm(
                 rollout_dataloader,
@@ -169,8 +187,60 @@ class Trainer:
                     train_loss,
                     epoch * len(rollout_dataloader) + batch_number,
                 )
+        torch.cuda.empty_cache()
         torch.save(
             {"model_state": self.vision.state_dict()}, self.vision_args.save_path
+        )
+
+    def _train_memory(
+        self,
+        latent_dataloader: RolloutDataloader,
+        optimizer: torch.optim.Adam,
+        writer: SummaryWriter,
+        trainer_epoch: int,
+    ):
+        self.memory.train()
+        initial_epoch = trainer_epoch * self.memory_args.epochs
+        for epoch in range(initial_epoch, initial_epoch + self.memory_args.epochs):
+            train_loss = 0.0
+            for (
+                batch_latent_episodes_observations,
+                batch_latent_episodes_actions,
+                _,
+            ) in tqdm(
+                latent_dataloader,
+                total=len(latent_dataloader),
+                desc="Training memory",
+                leave=False,
+            ):
+                batch_latent_episodes_observations = (
+                    batch_latent_episodes_observations.to(self.device)
+                )
+                batch_latent_episodes_actions = batch_latent_episodes_actions.to(
+                    self.device
+                )
+                target = batch_latent_episodes_observations[:, 1:, :]
+                pi, mu, sigma, *_ = self.memory.forward(
+                    batch_latent_episodes_observations[:, :-1],
+                    batch_latent_episodes_actions[:, :-1],
+                )
+                loss = self.memory.loss(pi, mu, sigma, target)
+                optimizer.zero_grad()
+                loss.backward(retain_graph=True)
+                optimizer.step()
+                train_loss += loss.item()
+            train_loss /= len(latent_dataloader)
+            tqdm.write(
+                f"Memory summary: Epoch {epoch+1} | " + f"Train_loss {train_loss}"
+            )
+            writer.add_scalar(
+                "Loss/Train",
+                train_loss,
+                epoch,
+            )
+        torch.cuda.empty_cache()
+        torch.save(
+            {"model_state": self.memory.state_dict()}, self.memory_args.save_path
         )
 
     def train(self):
@@ -190,32 +260,21 @@ class Trainer:
             initial_solution, 0.2, {"popsize": self.controller_args.num_agents}
         )
         bestfit = float("-inf")
-        for epoch in range(2):
+        for epoch in tqdm(range(self.epochs), desc="Training World Models"):
             solutions = solver.ask()
             # Evolve Controller
-            with ProcessPoolExecutor() as executor:
-                policies = [
-                    Policy(
-                        self.vision,
-                        self.memory,
-                        Controller().set_weights(solution),
-                        device=self.device,
-                    )
-                    for solution in solutions
-                ]
-                results = list(executor.map(self.rollout, policies))
-            fitlist = [-reward for _, reward in results]
+            episodes, rewards = self._evaluate_controller(solutions)
+            fitlist = [-reward for reward in rewards]
             solver.tell(solutions, fitlist)
             epoch_bestsol, epoch_bestfit, *_ = solver.result
+            epoch_bestfit = -epoch_bestfit
             if epoch_bestfit > bestfit:
+                bestfit = epoch_bestfit
                 torch.save(
                     {"model_state": self.controller.set_weights(epoch_bestsol)},
                     self.controller_args.save_path,
                 )
-            # Create a dataset with the new rollouts
-            episodes = [
-                episode for episodes_list, _ in results for episode in episodes_list
-            ]
+                tqdm.write(f"Epoch {epoch} bestfit {bestfit}")
             rollout_dataset = RolloutDataset(episodes)
             rollout_dataloader = RolloutDataloader(
                 rollout_dataset, batch_size=self.vision_args.batch_size
@@ -224,19 +283,33 @@ class Trainer:
             self._train_vision(
                 rollout_dataloader, vision_optimizer, vision_writer, epoch
             )
-            # Create a latent dataset 
-            latent_episodes =[
-                LatentEpisode(self.vision.get_latent(episode.observation),episode.actions,episode.rewards) for episode in episodes
+            # Create a latent dataset
+            episodes = [
+                LatentEpisode(
+                    self.vision.get_latent(episode.observations),
+                    episode.actions,
+                    episode.rewards,
+                )
+                for episode in rollout_dataset
             ]
-            latent_dataset = 
+            rollout_dataset = RolloutDataset(episodes)
+            rollout_dataloader = RolloutDataloader(
+                rollout_dataset, batch_size=self.memory_args.batch_size
+            )
+            self._train_memory(
+                rollout_dataloader, memory_optimizer, memory_writer, epoch
+            )
         vision_writer.close()
         memory_writer.close()
 
 
 if __name__ == "__main__":
-    torch.multiprocessing.set_start_method("spawn")
+    # torch.multiprocessing.set_start_method("spawn")
     trainer = Trainer(
-        controller_args=ControllerArgs(num_agents=1),
-        vision_args=VisionArgs(batch_size=2, epochs=3),
+        controller_args=ControllerArgs(num_agents=24),
+        vision_args=VisionArgs(epochs=3),
+        memory_args=MemoryArgs(
+            epochs=3,
+        ),
     )
     trainer.train()
