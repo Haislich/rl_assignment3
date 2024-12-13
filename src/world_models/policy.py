@@ -1,11 +1,9 @@
-from pathlib import Path
 import torch
 import torchvision.transforms as T
 from world_models.models.controller import Controller
 from world_models.models.memory import MDN_RNN
 from world_models.models.vision import ConvVAE
 import numpy as np
-from world_models.dataset import RolloutDataset
 
 
 class Policy:
@@ -19,24 +17,31 @@ class Policy:
 
     def __init__(
         self,
+        vision: ConvVAE,
+        memory: MDN_RNN,
+        controller: Controller,
+        device: torch.device = torch.device(
+            "cuda" if torch.cuda.is_available() else "cpu"
+        ),
     ):
         super().__init__()
-        try:
-            self.vision = ConvVAE.from_pretrained("cpu")
-            self.memory = MDN_RNN.from_pretrained("cpu")
-            self.controller = Controller.from_pretrained()
-        except FileNotFoundError:
-            self.vision = ConvVAE().to("cpu")
-            self.memory = MDN_RNN().to("cpu")
-            self.controller = Controller().to("cpu")
-        self.vision = self.vision.eval()
-        self.memory = self.memory.eval()
-        self.controller = self.controller.eval()
+        self.device = device
+        self.vision = vision.to(device)
+        self.memory = memory.to(device)
+        self.controller = controller.to(device)
+        # self.vision = ConvVAE.from_pretrained(device)
+        # self.memory = MDN_RNN.from_pretrained(device)
+        # self.controller = Controller.from_pretrained(device)
         self._hidden_state, self._cell_state = self.memory.init_hidden()
 
     def act(self, state) -> np.ndarray:
+        self.vision = self.vision.eval()
+        self.memory = self.memory.eval()
+        self.controller = self.controller.eval()
         with torch.no_grad():
-            observation: torch.Tensor = self.transformation(state)
+            observation: torch.Tensor = self.transformation(state).to(
+                self.device
+            )  # type : ignore
             latent_observation = self.vision.get_latent(observation.unsqueeze(0))
             latent_observation = latent_observation.unsqueeze(0)
             action = self.controller(latent_observation, self._hidden_state)
@@ -50,18 +55,5 @@ class Policy:
             )
             return action.detach().cpu().numpy().ravel()
 
-
-class PolicyDataset(RolloutDataset):
-    def __init__(
-        self,
-        num_rollouts: int,
-        max_steps: int,
-        *,
-        env_name: str = "CarRacing-v3",
-        root: Path = Path("./data/rollouts"),
-    ):
-        super().__init__(num_rollouts, max_steps, env_name=env_name, root=root)
-        self.policy = Policy()
-
-    def sampling_strategy(self, _env, observation: np.ndarray) -> np.ndarray:
-        return self.policy.act(observation)
+    def evolve(self, weights: np.ndarray):
+        self.controller.set_weights(weights)

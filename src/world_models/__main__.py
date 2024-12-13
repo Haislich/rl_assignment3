@@ -7,11 +7,10 @@ import gymnasium as gym
 
 def evaluate(env=None, n_episodes=1, render=False):
     agent = Policy()
-    agent.load()
 
-    env = gym.make("CarRacing-v2", continuous=agent.continuous)
+    env = gym.make("CarRacing-v2")
     if render:
-        env = gym.make("CarRacing-v2", continuous=agent.continuous, render_mode="human")
+        env = gym.make("CarRacing-v2", render_mode="human")
 
     rewards = []
     for episode in range(n_episodes):
@@ -30,21 +29,12 @@ def evaluate(env=None, n_episodes=1, render=False):
     print("Mean Reward:", np.mean(rewards))
 
 
-def train():
-    agent = Policy()
-    agent.train()
-    agent.save()
-
-
 def main():
     parser = argparse.ArgumentParser(description="Run training and evaluation")
     parser.add_argument("--render", action="store_true")
     parser.add_argument("-t", "--train", action="store_true")
     parser.add_argument("-e", "--evaluate", action="store_true")
     args = parser.parse_args()
-
-    if args.train:
-        train()
 
     if args.evaluate:
         evaluate(render=args.render)
